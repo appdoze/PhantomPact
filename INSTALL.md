@@ -2,8 +2,9 @@
 
 (The mod's folder and log tag are `PBZCoop`.)
 
-**Found a bug?** Open an issue with the bug-report template (it asks for your `UE4SS.log` and
-`net_status.txt`), or post in the Nexus Mods Bugs tab.
+**Found a bug?** Post in the Bugs tab of the mod's Nexus Mods page with what happened (host or client, which
+area or boss), your `ue4ss\UE4SS.log` and `ue4ss\Mods\PBZCoop\net_status.txt`. Testers with access to the
+GitHub repo can open an issue with the Bug report template instead.
 
 Play the campaign with a friend: you see each other as a second Hun, fight the same enemies and bosses, and
 share loot, dust and bell rests. The host's game decides enemies, bosses and deaths; the friend's game follows.
