@@ -101,14 +101,31 @@ return function(api)
         return true
     end
 
+    -- Original lines in the game's wuxia spirit (not quotes from the game), one picked at random per duel.
+    local WIN_LINES = {
+        "Your blade was faster. The pact holds.",
+        "One cut, one answer. You stand.",
+        "The phantom fades; your edge remains.",
+        "Steel spoke, and it spoke your name.",
+        "A soul tested, a soul proven.",
+    }
+    local LOSS_LINES = {
+        "Your blade wavered. Rise, and draw again.",
+        "Even a phantom bleeds. Return to the bell.",
+        "The duel is lost, not the pact.",
+        "Your partner's steel found its mark.",
+        "Fall, rise, and sharpen your soul.",
+    }
+
     local function scoreRound(won)
         if won then
             pvp.wins = pvp.wins + 1
         else
             pvp.losses = pvp.losses + 1
         end
-        log(string.format("PvP: you %s. Score %d - %d.", won and "WON the duel" or "were killed by your partner",
-            pvp.wins, pvp.losses))
+        local lines = won and WIN_LINES or LOSS_LINES
+        log(string.format("PvP: %s %s Score %d - %d.", won and "VICTORY." or "DEFEAT.",
+            lines[math.random(#lines)], pvp.wins, pvp.losses))
     end
 
     local lastPartnerHitAt = -100   -- os.clock() of the partner's last hit on us

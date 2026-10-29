@@ -48,7 +48,8 @@ Both players set `PvP = On` in `PhantomPact.ini`. Your partner becomes an oppone
   a well-timed **parry** (tap guard just before the hit) costs nothing, and dodges work as usual.
 - A parry is rewarded like against a boss: the attacker staggers and loses posture (`PvPParryPosture`, default 60).
 - The loser dies for real and respawns at their bell, as after any death. A kill by your partner is scored
-  in the UE4SS console (`PvP: you WON the duel. Score 1 - 0.`); dying to an enemy doesn't count.
+  in the UE4SS console (`PvP: VICTORY. Your blade was faster. The pact holds. Score 1 - 0.`); dying to an
+  enemy doesn't count.
   (In the prologue area the game won't let you die, so duel there for fun and the score still counts.)
 - Both players fight with the same strength (your partner's ghost uses your stats), so skill decides.
   `PvPDamage` scales the damage you take (100 = normal).
