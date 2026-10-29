@@ -1,0 +1,1 @@
+UE4SS loads this mod because this file exists. Delete it to disable PBZCoop.

@@ -1,0 +1,786 @@
+-- PBZCoop game adapter for Phantom Blade Zero: what counts as an enemy, how health is read and changed, how a
+-- player's moves are recognised and replayed, and how pickups are found. coop.lua calls these through api.game;
+-- every function is optional, and missing ones simply switch that feature off.
+--
+-- Where the names come from (UE4SS SDK dump of build 26266538, see docs/RECON_NOTES.md):
+--   enemies   APBZCharacter_NPC (BIsMonster), health in AttributeSetBase (UBasicAttributeSet.Health/Health_Max),
+--             Kill(EPBZDieReason), hits through APBZCharacter::OnDamage
+--   bosses    UPBZHUDLayout::RegisterBossHPBar(AActor*) plus FCodexEnemyRow.bIsBoss in DT_CodexEnemyDataTable
+--   moves     GAS abilities (GA_Hun_Young_A, ..._AdvancedDash, ...) in the ASC's ActivatableAbilities
+--   aggro     the hatred component's AddActorToHatredList
+--   items     APBZPickupActor.ItemId, UPBZBackPackSubsystem::AddPropsToBackPack
+
+return function(api)
+    local log, valid, distance = api.log, api.valid, api.distance
+
+    local PLAYER_CLASS_PREFIX = "BP_Renewal_Hun"   -- Hun's classes (young/adult); never treated as enemies
+    local CODEX_TABLE = "/Game/PBZContent/DataTable/DT_CodexEnemyDataTable.DT_CodexEnemyDataTable"
+    local DIE_DAMAGED, DIE_GAME_LOGIC = 1, 3        -- EPBZDieReason
+    local SPAWN_ADJUST_ALWAYS = 2                   -- ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn
+    local SCALE_MULTIPLY_WITH_ROOT = 1              -- ESpawnActorScaleMethod::MultiplyWithRoot
+    local GHOST_AGGRO_CM = 2500                     -- enemies this close to the ghost also hate it
+    local PICKUP_WATCH_CM = 500                     -- a vanished pickup this close to the local player was taken by them
+    local GHOST_BUSY_S = 0.6                        -- after replaying a move, don't steer the ghost for this long
+
+    local game = { commands = {} }
+    local bosses = {}             -- actor address -> true, from RegisterBossHPBar
+    local codexBoss = {}          -- class name (without _C) -> bIsBoss, filled lazily
+    local syncing = false         -- true while the mod itself changes health, so OnDamage isn't re-reported
+    local ghostBusyUntil = 0
+
+    local function className(actor)
+        return actor:GetClass():GetFName():ToString()
+    end
+
+    local function lib(path)
+        return StaticFindObject(path)
+    end
+
+    local function worldSubsystem(contextActor, classPath)
+        local bl = lib("/Script/Engine.Default__SubsystemBlueprintLibrary")
+        local cls = lib(classPath)
+        if not valid(bl) or not valid(cls) then
+            return nil
+        end
+        local s = bl:GetWorldSubsystem(contextActor, cls)
+        return valid(s) and s or nil
+    end
+
+    local function codexRow(name)
+        local dt = lib(CODEX_TABLE)
+        if not valid(dt) then
+            return nil
+        end
+        local ok, row = pcall(function() return dt:FindRow(name) end)
+        return ok and row or nil
+    end
+
+    ------------------------------------------------------------------ enemies and health
+
+    local function isEnemy(actor)
+        if not valid(actor) then
+            return false
+        end
+        local cn = className(actor)
+        if cn:find(PLAYER_CLASS_PREFIX, 1, true) then
+            return false
+        end
+        local ok, monster = pcall(function() return actor.BIsMonster end)
+        return (ok and monster == true) or cn:find("^BP_Monster") ~= nil
+    end
+    game.isEnemy = isEnemy
+
+    -- Enemy ids that are the same on both PCs. Runtime actor names are not (the same placed character was
+    -- ..._2147476826 in one session and ..._2147477757 in the next), but enemies come from level-placed
+    -- AISpawners whose designer SpawnerID ("ZuoShangyoung_Seq003") is stable, so an enemy made by a spawner is
+    -- "sp:<SpawnerID>". Others keep their actor name, and coop.lua falls back to class + position matching.
+    -- Scanning every AISpawner is slow, so at most once per ID_REFRESH_S unless forced.
+    local ID_REFRESH_S = 1.0
+    local spawnerIds = {}
+    local idsRefreshedAt = nil
+    function game.refreshEnemyIds(force)
+        local now = os.clock()
+        if not force and idsRefreshedAt ~= nil and now - idsRefreshedAt < ID_REFRESH_S then
+            return
+        end
+        idsRefreshedAt = now
+        spawnerIds = {}
+        for _, s in ipairs(FindAllOf("AISpawner") or {}) do
+            pcall(function()
+                local a = s.SpawnedAI
+                if valid(a) then
+                    spawnerIds[a:GetAddress()] = "sp:" .. s.SpawnerID:ToString()
+                end
+            end)
+        end
+    end
+
+    function game.enemyId(actor)
+        return spawnerIds[actor:GetAddress()] or actor:GetFName():ToString()
+    end
+
+    function game.enemyClass(actor)
+        return className(actor)
+    end
+
+    -- spawner <SpawnerID|list>: make a level AISpawner spawn its enemy, as the game's encounter scripts do.
+    game.commands.spawner = function(id)
+        for _, s in ipairs(FindAllOf("AISpawner") or {}) do
+            local sid = "?"
+            pcall(function() sid = s.SpawnerID:ToString() end)
+            if id == nil or id == "" or id == "list" then
+                log("  spawner " .. sid)
+            elseif sid == id then
+                local ok, err = pcall(function() s:ClaimSeqSpawn(false, true, true) end)
+                log("ClaimSeqSpawn(" .. sid .. "): " .. tostring(ok) .. " " .. tostring(err))
+                return
+            end
+        end
+    end
+
+    -- Cached for ENEMY_CACHE_S: the host and client halves (and aggro) all ask within the same tick.
+    -- fresh = true skips the cache.
+    local ENEMY_CACHE_S = 0.1
+    local enemyCache, enemyCacheAt = nil, nil
+    function game.listEnemies(fresh)
+        local now = os.clock()
+        if not fresh and enemyCache ~= nil and now - enemyCacheAt < ENEMY_CACHE_S then
+            return enemyCache
+        end
+        local out = {}
+        for _, ch in ipairs(FindAllOf("PBZCharacter_NPC") or {}) do
+            if isEnemy(ch) then
+                out[#out + 1] = ch
+            end
+        end
+        enemyCache, enemyCacheAt = out, now
+        return out
+    end
+
+    function game.getHealth(actor)
+        local ok, hp, maxhp = pcall(function()
+            local set = actor.AttributeSetBase
+            return set.Health.CurrentValue, set.Health_Max.CurrentValue
+        end)
+        -- A stale actor (e.g. one replaced by a respawn) can hand back an object instead of a number.
+        if ok and type(hp) == "number" and type(maxhp) == "number" then
+            return hp, maxhp
+        end
+        return nil, nil
+    end
+
+    function game.setHealth(actor, hp)
+        local cur = game.getHealth(actor)
+        if cur == nil or math.abs(cur - hp) < 0.5 then
+            return
+        end
+        syncing = true
+        pcall(function()
+            local h = actor.AttributeSetBase.Health
+            h.BaseValue = hp
+            h.CurrentValue = hp
+        end)
+        syncing = false
+    end
+
+    -- IsDead() stayed false on a thug at 0 HP during its death animation, so health counts too.
+    function game.isDead(actor)
+        local hp = game.getHealth(actor)
+        if hp ~= nil and hp <= 0 then
+            return true
+        end
+        local ok, dead = pcall(function() return actor:IsDead() end)
+        return ok and dead == true
+    end
+
+    -- A boss that died (or a bell respawn, see coop.lua) leaves the registry, so its next fight is announced again.
+    local function forgetBoss(actor)
+        pcall(function() bosses[actor:GetAddress()] = nil end)
+    end
+
+    function game.resetBosses()
+        bosses = {}
+    end
+
+    function game.kill(actor)
+        forgetBoss(actor)
+        syncing = true
+        local ok, err = pcall(function() actor:Kill(DIE_GAME_LOGIC) end)
+        syncing = false
+        if not ok then
+            log("Kill failed: " .. tostring(err))
+        end
+    end
+
+    -- Posture ("Shachi"): breaking it opens an execution.
+    function game.getPosture(actor)
+        local ok, v = pcall(function() return actor.AttributeSetBase.Shachi.CurrentValue end)
+        return (ok and type(v) == "number") and v or nil
+    end
+
+    function game.setPosture(actor, value)
+        syncing = true
+        pcall(function()
+            local s = actor.AttributeSetBase.Shachi
+            s.BaseValue = value
+            s.CurrentValue = value
+        end)
+        syncing = false
+    end
+
+    -- Host: the client's player hit this enemy. Lower its health and posture; at zero health, let the game run
+    -- its death.
+    function game.applyDamage(actor, amount, postureDamage)
+        local hp = game.getHealth(actor)
+        if hp == nil or hp <= 0 then
+            return
+        end
+        local posture = game.getPosture(actor)
+        if posture and postureDamage and postureDamage > 0 then
+            game.setPosture(actor, math.max(0, posture - postureDamage))
+        end
+        local left = math.max(0, hp - amount)
+        game.setHealth(actor, left)
+        if left <= 0 then
+            forgetBoss(actor)
+            syncing = true
+            pcall(function() actor:Kill(DIE_DAMAGED) end)
+            syncing = false
+        end
+    end
+
+    function game.isBoss(actor)
+        if bosses[actor:GetAddress()] then
+            return true
+        end
+        local cn = className(actor):gsub("_C$", "")
+        if codexBoss[cn] == nil then
+            local row = codexRow(cn)
+            codexBoss[cn] = row ~= nil and row.bIsBoss == true
+        end
+        return codexBoss[cn]
+    end
+
+    -- The HUD registers a boss health bar when a boss fight starts: the surest way to know who the boss is.
+    local showingRemoteBoss = false
+    pcall(function()
+        RegisterHook("/Script/ProjectPBZ.PBZHUDLayout:RegisterBossHPBar", function(_, bossParam)
+            local boss = bossParam:get()
+            if valid(boss) and not bosses[boss:GetAddress()] then
+                bosses[boss:GetAddress()] = true
+                log("Boss fight: " .. boss:GetFName():ToString())
+                if api.coop and not showingRemoteBoss then
+                    -- The same cross-PC id the snapshots use (sp:<SpawnerID> for spawner bosses).
+                    game.refreshEnemyIds(true)
+                    api.coop.sendEvent("B", game.enemyId(boss))
+                end
+            end
+        end)
+    end)
+
+    -- The other player's game started a fight with this boss: show its health bar here too (our copy of the
+    -- boss mirrors the host's health, so the bar follows the real fight).
+    function game.showBossBar(boss)
+        if not valid(boss) or bosses[boss:GetAddress()] then
+            return
+        end
+        local hud = FindFirstOf("PBZHUDLayout")
+        if not valid(hud) then
+            log("No HUD layout to show the boss bar on.")
+            return
+        end
+        showingRemoteBoss = true
+        local ok, err = pcall(function() hud:RegisterBossHPBar(boss) end)
+        showingRemoteBoss = false
+        bosses[boss:GetAddress()] = true
+        log(ok and ("Showing boss bar for " .. boss:GetFName():ToString()) or ("Boss bar failed: " .. tostring(err)))
+    end
+
+    -- Boss arenas are sealed by fog walls (BP_FogDoor_C). When the other player's boss fight starts, close the
+    -- fog walls near our copy of the boss; when the boss dies, open them.
+    local FOG_RADIUS_CM = 6000
+    function game.setBossFog(boss, closed)
+        if not valid(boss) then
+            return 0
+        end
+        local at = boss:K2_GetActorLocation()
+        local n = 0
+        for _, door in ipairs(FindAllOf("BP_FogDoor_C") or {}) do
+            local ok, loc = pcall(function() return door:K2_GetActorLocation() end)
+            if ok and loc.X and distance(loc, at) <= FOG_RADIUS_CM then
+                local fn = closed and "Close By Mob Script" or "OpenByMobScript"
+                if pcall(function() door[fn](door) end) then
+                    n = n + 1
+                end
+            end
+        end
+        if n > 0 then
+            log(string.format("%s %d fog wall(s) at %s.", closed and "Closed" or "Opened", n, boss:GetFName():ToString()))
+        end
+        return n
+    end
+
+    -- fog: test helper, list fog walls with distance to player 1 and their state.
+    game.commands.fog = function()
+        local _, pawn = api.getPlayer1()
+        local here = pawn:K2_GetActorLocation()
+        for _, door in ipairs(FindAllOf("BP_FogDoor_C") or {}) do
+            local st = "?"
+            pcall(function() st = tostring(door.bDesiredState) end)
+            log(string.format("  %s desired=%s %.0f m", door:GetFName():ToString():sub(-24), st,
+                distance(door:K2_GetActorLocation(), here) / 100))
+        end
+    end
+
+    -- bossbar: test helper, start the boss bar for the nearest boss as if its fight began.
+    game.commands.bossbar = function()
+        for _, e in ipairs(game.listEnemies()) do
+            if game.isBoss(e) and not game.isDead(e) then
+                local hud = FindFirstOf("PBZHUDLayout")
+                local ok, err = pcall(function() hud:RegisterBossHPBar(e) end)
+                log("RegisterBossHPBar(" .. e:GetFName():ToString() .. "): " .. tostring(ok) .. " " .. tostring(err))
+                return
+            end
+        end
+        log("No living boss loaded.")
+    end
+
+    -- Note: APBZCharacter::OnDamage looked like the place to catch hits, but PBZ calls it natively and a UE4SS
+    -- hook never fires, so coop.lua detects hits by watching health and posture drop instead.
+
+    ------------------------------------------------------------------ moves (attacks, dodges, parries)
+
+    local function abilitySystem(actor)
+        local bl = lib("/Script/GameplayAbilities.Default__AbilitySystemBlueprintLibrary")
+        local asc = valid(bl) and bl:GetAbilitySystemComponent(actor) or nil
+        return valid(asc) and asc or nil
+    end
+
+    local function forEachSpec(asc, fn)
+        local ok = pcall(function()
+            asc.ActivatableAbilities.Items:ForEach(function(_, elem)
+                fn(elem:get())
+            end)
+        end)
+        return ok
+    end
+
+    local activeLocal = {}        -- ability class path -> true while active on the local player
+
+    -- Called every snapshot: any GA_* ability that just became active on the local player is sent as a move.
+    function game.watchLocalPlayer(pawn, sendEvent)
+        local asc = abilitySystem(pawn)
+        if not asc then
+            return
+        end
+        local nowActive = {}
+        forEachSpec(asc, function(spec)
+            local ability = spec.Ability
+            if spec.ActiveCount > 0 and valid(ability) then
+                local cls = ability:GetClass()
+                local name = cls:GetFName():ToString()
+                -- Only Hun's own moves (GA_Hun_Young_A, ..._AdvancedDash, ...); background abilities such as
+                -- GA_LocomotionDriver_3DDefault are always active and aren't moves.
+                if name:find("^GA_Hun") then
+                    local path = cls:GetFullName():gsub("^%S+ ", "")
+                    nowActive[path] = true
+                    if not activeLocal[path] then
+                        -- The facing at the start of the move, so the ghost swings where the player aimed.
+                        sendEvent("M", path, string.format("%.1f", pawn:K2_GetActorRotation().Yaw))
+                    end
+                end
+            end
+        end)
+        activeLocal = nowActive
+    end
+
+    -- Replays the remote player's move on the ghost. Gives the ability first if the ghost lacks it.
+    function game.playMove(ghost, classPath, yaw)
+        local cls = StaticFindObject(classPath)
+        if not valid(cls) then
+            log("Move class not loaded here: " .. classPath)
+            return
+        end
+        local asc = abilitySystem(ghost)
+        if not asc then
+            return
+        end
+        if yaw then
+            pcall(function() ghost:K2_SetActorRotation({ Pitch = 0.0, Yaw = yaw, Roll = 0.0 }, false) end)
+            game.lastMoveYaw = yaw
+        end
+        local ok, activated = pcall(function() return asc:TryActivateAbilityByClass(cls, true) end)
+        if not (ok and activated) then
+            pcall(function() asc:K2_GiveAbility(cls, 1, -1) end)
+            ok, activated = pcall(function() return asc:TryActivateAbilityByClass(cls, true) end)
+        end
+        ghostBusyUntil = os.clock() + GHOST_BUSY_S
+        if not (ok and activated) then
+            log("Ghost couldn't play " .. classPath:match("([^.]+)$"))
+        end
+    end
+
+    ------------------------------------------------------------------ hit reactions
+
+    -- Scans every HitreactComponent, so after a miss the same actor isn't scanned again for HITREACT_RETRY_S.
+    local HITREACT_RETRY_S = 2.0
+    local hitreactMissUntil = {}  -- actor address -> os.clock() before which a lookup returns nil straight away
+    local function hitreactComponent(actor)
+        local addr = actor:GetAddress()
+        if hitreactMissUntil[addr] ~= nil and os.clock() < hitreactMissUntil[addr] then
+            return nil
+        end
+        for _, c in ipairs(FindAllOf("HitreactComponent") or {}) do
+            local ok, owner = pcall(function() return c:GetOwner() end)
+            if ok and valid(owner) and owner:GetAddress() == addr then
+                hitreactMissUntil[addr] = nil
+                return c
+            end
+        end
+        hitreactMissUntil[addr] = os.clock() + HITREACT_RETRY_S
+        return nil
+    end
+
+    local localHitComp, lastHitState = nil, "None"
+
+    -- Called every snapshot: when the local player starts reacting to a hit (stagger, knockdown...), send the
+    -- hit state's tag so the other player's ghost of us reacts the same way.
+    function game.watchHitState(pawn, sendEvent)
+        if not valid(localHitComp) then
+            localHitComp = hitreactComponent(pawn)
+            if not localHitComp then
+                return
+            end
+        end
+        local ok, tag = pcall(function() return localHitComp:GetCurrentHitState().TagName:ToString() end)
+        if not ok then
+            return
+        end
+        if tag ~= lastHitState and tag ~= "None" then
+            sendEvent("H", tag)
+        end
+        lastHitState = tag
+    end
+
+    local ghostHitComp = nil
+    function game.playHitReaction(ghost, tag)
+        if not valid(ghostHitComp) or ghostHitComp:GetOwner():GetAddress() ~= ghost:GetAddress() then
+            ghostHitComp = hitreactComponent(ghost)
+        end
+        if ghostHitComp then
+            local ok, err = pcall(function() ghostHitComp:ChangeHitState({ TagName = FName(tag) }, nil, false) end)
+            if not ok then
+                log("Ghost hit reaction failed: " .. tostring(err))
+            end
+            ghostBusyUntil = os.clock() + GHOST_BUSY_S
+        end
+    end
+
+    function game.ghostBusy()
+        return os.clock() < ghostBusyUntil
+    end
+
+    -- The ghost is a full Hun: make it harmless (the remote player's hits arrive as reported damage) and let
+    -- nearby enemies hate it so they fight it as well as the local player.
+    function game.setupGhost(ghost)
+        pcall(function()
+            local atk = ghost.AttributeSetBase.Attack
+            atk.BaseValue = 0
+            atk.CurrentValue = 0
+        end)
+    end
+
+    -- Every second (host): the ghost stays at full health, since the remote player's real health lives on
+    -- their PC, and enemies close to it add it to their hatred list.
+    function game.ghostAggro(ghost)
+        local _, maxhp = game.getHealth(ghost)
+        if maxhp then
+            game.setHealth(ghost, maxhp)
+        end
+        local g = ghost:K2_GetActorLocation()
+        for _, e in ipairs(game.listEnemies()) do
+            local ok, loc = pcall(function() return e:K2_GetActorLocation() end)
+            if ok and loc.X and distance(loc, g) <= GHOST_AGGRO_CM and not game.isDead(e) then
+                pcall(function()
+                    local hm = e.BP_PBZHatredManagerComponent
+                    local list = hm.HatredList
+                    local already = false
+                    list:ForEach(function(_, a)
+                        local actor = a:get()
+                        if valid(actor) and actor:GetAddress() == ghost:GetAddress() then
+                            already = true
+                        end
+                    end)
+                    if not already then
+                        hm:AddActorToHatredList(ghost, {})
+                    end
+                end)
+            end
+        end
+    end
+
+    ------------------------------------------------------------------ bells (rest = enemies respawn)
+
+    -- Resting at a bell (and respawning after death) runs the game mode's "Refresh Monster", which respawns the
+    -- regular enemies (bosses the game considers beaten stay dead). When it runs on one PC, the other PC runs
+    -- its own, so both worlds respawn together. The hook is registered once gameplay is up (the blueprint must
+    -- be loaded first).
+    local REFRESH_FN = "/Game/PBZContent/Blueprint/BP_GameMode_Build.BP_GameMode_Build_C:Refresh Monster"
+    local restHooked, refreshing = false, false
+
+    function game.hookRest(onRest)
+        if restHooked or not valid(StaticFindObject(REFRESH_FN)) then
+            return restHooked
+        end
+        local ok, err = pcall(function()
+            RegisterHook(REFRESH_FN, function()
+                if not refreshing then
+                    onRest()
+                end
+            end)
+        end)
+        restHooked = ok
+        log(ok and "Bell/respawn hook ready." or ("Bell hook failed: " .. tostring(err)))
+        return restHooked
+    end
+
+    -- The other player rested: respawn our regular enemies too.
+    function game.refreshEnemies()
+        local pc = api.getPlayer1()
+        local gm = valid(pc) and api.gs():GetGameMode(pc) or nil
+        if not valid(gm) then
+            return false
+        end
+        refreshing = true
+        local ok, err = pcall(function() gm["Refresh Monster"](gm) end)
+        refreshing = false
+        if not ok then
+            log("Refresh Monster failed: " .. tostring(err))
+        end
+        return ok
+    end
+
+    -- rest: test helper, run the game's enemy refresh as if player 1 rested at a bell (the hook sees it).
+    game.commands.rest = function()
+        local pc = api.getPlayer1()
+        local gm = api.gs():GetGameMode(pc)
+        local before = #game.listEnemies()
+        local ok, err = pcall(function() gm["Refresh Monster"](gm) end)
+        log(string.format("Refresh Monster: %s %s (enemies before %d, after %d)", tostring(ok), tostring(err), before,
+            #game.listEnemies(true)))
+    end
+
+    ------------------------------------------------------------------ currency (dust)
+
+    -- Dust gained locally (kill rewards, pickups) goes to the other player too: shared rewards. Spending isn't
+    -- mirrored. Amounts the mod itself added for the other player are not sent back.
+    local lastDust, syncedDust = nil, 0
+
+    local function dust(pawn)
+        local ok, v = pcall(function() return pawn.ConsciousnessDust end)
+        return ok and tonumber(v) or nil
+    end
+
+    function game.watchCurrency(pawn, sendEvent)
+        local d = dust(pawn)
+        if d == nil then
+            return
+        end
+        if lastDust ~= nil then
+            local gained = d - lastDust - syncedDust
+            if gained > 0 then
+                sendEvent("C", gained)
+            end
+        end
+        lastDust, syncedDust = d, 0
+    end
+
+    function game.addCurrency(pawn, amount)
+        if not valid(pawn) or amount <= 0 then
+            return
+        end
+        local ok = pcall(function() pawn:ChangeDustNumInternal(amount) end)
+        if ok then
+            syncedDust = syncedDust + amount
+            log("Shared dust: +" .. amount)
+        end
+    end
+
+    ------------------------------------------------------------------ items
+
+    local watched = {}            -- pickup name -> { itemId } for pickups near the local player last tick
+
+    local function pickupItemId(p)
+        local ok, id = pcall(function() return p.ItemId:ToString() end)
+        return ok and id or "?"
+    end
+
+    -- Called every few snapshots: pickups that were next to the local player and are now gone were taken by
+    -- them. "Gone" includes a destroyed pickup that FindAllOf still returns (it stays valid until garbage
+    -- collection, but loses its position) and one the game marked unpickable.
+    -- After a map change (or while the pickups are unloaded mid-load: FindAllOf finds none at all) the watched
+    -- pickups vanished because the level went away, not because the player took them: report nothing then.
+    local PICKUP_JUMP_CM = 1000
+    local watchedMap = nil
+    function game.watchPickups(pawn, report)
+        local here = pawn:K2_GetActorLocation()
+        local all = FindAllOf("PBZPickupActor") or {}
+        local map = game.mapName(pawn)
+        if map ~= watchedMap or (#all == 0 and next(watched) ~= nil) then
+            watchedMap = map
+            watched = {}
+        end
+        local present = {}
+        for _, p in ipairs(all) do
+            if valid(p) then
+                local okP, pickable = pcall(function() return p.bIsPickable end)
+                local okL, loc = pcall(function() return p:K2_GetActorLocation() end)
+                if (not okP or pickable ~= false) and okL and loc.X then
+                    present[p:GetFName():ToString()] = { actor = p, loc = loc }
+                end
+            end
+        end
+        for name, info in pairs(watched) do
+            local now = present[name]
+            if now == nil or distance(now.loc, info.loc) > PICKUP_JUMP_CM then
+                report(name, info.itemId)
+                present[name] = nil
+            end
+        end
+        watched = {}
+        for name, p in pairs(present) do
+            if distance(p.loc, here) <= PICKUP_WATCH_CM then
+                watched[name] = { itemId = pickupItemId(p.actor), loc = p.loc }
+            end
+        end
+    end
+
+    -- The other player took this pickup: remove our copy and give us the same item, so loot is shared.
+    function game.takeRemotePickup(name, itemId, pawn)
+        for _, p in ipairs(FindAllOf("PBZPickupActor") or {}) do
+            if valid(p) and p:GetFName():ToString() == name then
+                watched[name] = nil
+                p:K2_DestroyActor()
+                break
+            end
+        end
+        if itemId and itemId ~= "?" and valid(pawn) then
+            local bp = worldSubsystem(pawn, "/Script/ProjectPBZ.PBZBackPackSubsystem")
+            if bp then
+                -- AddPropsToBackPack is the backpack's own entry point; if the item count didn't move (seen in the
+                -- prologue map, which keeps its own restricted backpack), fall back to the player's GiveItem.
+                local before = game.itemCount(bp, itemId)
+                pcall(function() bp:AddPropsToBackPack(1, FName(itemId), true) end)
+                local after = game.itemCount(bp, itemId)
+                if after <= before then
+                    pcall(function() pawn:GiveItem(FName(itemId), 1) end)
+                    after = game.itemCount(bp, itemId)
+                end
+                log(string.format("Shared loot: %s (%d -> %d)", itemId, before, after))
+            end
+        end
+    end
+
+    -- How many of this item the backpack holds (0 if it has no entry).
+    function game.itemCount(bp, itemId)
+        local n = 0
+        pcall(function()
+            bp.Inventories:ForEach(function(k, v)
+                if k:get():ToString() == itemId then
+                    n = v:get().CurrentAmount
+                end
+            end)
+        end)
+        return n
+    end
+
+    -- Short name of the current map, so a ghost from another map isn't shown in this one.
+    function game.mapName(contextActor)
+        local ok, name = pcall(function() return api.gs():GetCurrentLevelName(contextActor, true):ToString() end)
+        return ok and name or "?"
+    end
+
+    ------------------------------------------------------------------ test helpers (commands)
+
+    local function spawnAt(cls, loc, yaw)
+        local gs = api.gs()
+        local pc = api.getPlayer1()
+        local t = {
+            Rotation = { X = 0.0, Y = 0.0, Z = math.sin(math.rad(yaw) / 2), W = math.cos(math.rad(yaw) / 2) },
+            Translation = { X = loc.X, Y = loc.Y, Z = loc.Z },
+            Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
+        }
+        local actor = gs:BeginDeferredActorSpawnFromClass(pc, cls, t, SPAWN_ADJUST_ALWAYS, nil, SCALE_MULTIPLY_WITH_ROOT)
+        if not valid(actor) then
+            return nil
+        end
+        actor = gs:FinishSpawningActor(actor, t, SCALE_MULTIPLY_WITH_ROOT)
+        if valid(actor) then
+            actor:K2_SetActorLocationAndRotation(t.Translation, { Pitch = 0.0, Yaw = yaw, Roll = 0.0 }, false, {}, true)
+        end
+        return actor
+    end
+
+    -- spawnenemy <codex row> [distance cm]: spawn one of the game's enemies in front of player 1.
+    game.commands.spawnenemy = function(args)
+        local name, dist = (args or ""):match("^(%S+)%s*(%d*)")
+        if not name then
+            log("Usage: spawnenemy <codex row, e.g. BP_Monster_MaleThug_Sword_Blue> [distance]")
+            return
+        end
+        local row = codexRow(name)
+        if row == nil then
+            log("No codex row " .. name)
+            return
+        end
+        local ksl = lib("/Script/Engine.Default__KismetSystemLibrary")
+        local cls = ksl:LoadClassAsset_Blocking(row.EnemyClass)
+        if not valid(cls) then
+            log("Couldn't load class for " .. name)
+            return
+        end
+        local _, pawn = api.getPlayer1()
+        local l = pawn:K2_GetActorLocation()
+        local yaw = pawn:K2_GetActorRotation().Yaw
+        local d = tonumber(dist) or 700
+        local at = { X = l.X + math.cos(math.rad(yaw)) * d, Y = l.Y + math.sin(math.rad(yaw)) * d, Z = l.Z + 30 }
+        local e = spawnAt(cls, at, yaw + 180)
+        if not valid(e) then
+            log("Spawn failed for " .. name)
+            return
+        end
+        pcall(function() e:SpawnDefaultController() end)
+        local hp, maxhp = game.getHealth(e)
+        log(string.format("Spawned %s (%s) hp=%s/%s boss=%s", e:GetFName():ToString(), name, tostring(hp),
+            tostring(maxhp), tostring(row.bIsBoss)))
+    end
+
+    -- codex [bosses]: list enemy codex rows (or only the bosses).
+    game.commands.codex = function(args)
+        local dt = lib(CODEX_TABLE)
+        local onlyBosses = args == "bosses"
+        local names = {}
+        dt:ForEachRow(function(rowName, row)
+            local n = type(rowName) == "string" and rowName or tostring(rowName:ToString())
+            if not onlyBosses or row.bIsBoss then
+                names[#names + 1] = n
+            end
+        end)
+        log((onlyBosses and "Boss rows: " or "Enemy rows: ") .. #names)
+        for i = 1, #names, 8 do
+            log("  " .. table.concat(names, " ", i, math.min(#names, i + 7)))
+        end
+    end
+
+    -- enemies: every enemy the mod sees, with health and boss flag.
+    game.commands.enemies = function()
+        local _, pawn = api.getPlayer1()
+        local here = valid(pawn) and pawn:K2_GetActorLocation() or nil
+        local list = game.listEnemies()
+        log("Enemies: " .. #list)
+        for _, e in ipairs(list) do
+            local hp, maxhp = game.getHealth(e)
+            local d = here and distance(e:K2_GetActorLocation(), here) or -1
+            log(string.format("  %s hp=%s/%s dead=%s boss=%s %.0f cm", e:GetFName():ToString(), tostring(hp),
+                tostring(maxhp), tostring(game.isDead(e)), tostring(game.isBoss(e)), d))
+        end
+    end
+
+    -- items: pickups near player 1.
+    game.commands.items = function()
+        local _, pawn = api.getPlayer1()
+        local here = pawn:K2_GetActorLocation()
+        local all = FindAllOf("PBZPickupActor") or {}
+        log("Pickups loaded: " .. #all)
+        for _, p in ipairs(all) do
+            if valid(p) then
+                local d = distance(p:K2_GetActorLocation(), here)
+                if d < 5000 then
+                    log(string.format("  %s item=%s %.0f cm", p:GetFName():ToString(), pickupItemId(p), d))
+                end
+            end
+        end
+    end
+
+    return game
+end

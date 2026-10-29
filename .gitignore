@@ -1,0 +1,12 @@
+# Class/object dumps from UE4SS are large and contain game data
+dumps/
+# Self-test runs (relay logs, state file)
+logs/
+# Release builds (tools\make-release.ps1)
+dist/
+*.log
+# 4K screenshot originals (the 1080p JPGs are kept)
+art/screenshots/*.png
+# Local Claude Code settings
+.claude/
+__pycache__/
