@@ -375,8 +375,15 @@ return function(api)
     end
 
     -- Replays the remote player's move on the ghost. Gives the ability first if the ghost lacks it.
+    local loadTried = {}          -- class path -> true once we tried loading it (a failed load isn't retried)
     function game.playMove(ghost, classPath, yaw)
         local cls = StaticFindObject(classPath)
+        if not valid(cls) and not loadTried[classPath] and type(LoadAsset) == "function" then
+            -- A move of a weapon the local player doesn't carry isn't in memory yet (other weapons, Phantom Edge).
+            loadTried[classPath] = true
+            pcall(LoadAsset, classPath)
+            cls = StaticFindObject(classPath)
+        end
         if not valid(cls) then
             log("Move class not loaded here: " .. classPath)
             return
@@ -442,6 +449,7 @@ return function(api)
         lastHitState = tag
     end
 
+    local clearHitStateLater      -- defined below with staggerSelf
     local ghostHitComp = nil
     function game.playHitReaction(ghost, tag)
         if not valid(ghostHitComp) or ghostHitComp:GetOwner():GetAddress() ~= ghost:GetAddress() then
@@ -451,8 +459,37 @@ return function(api)
             local ok, err = pcall(function() ghostHitComp:ChangeHitState({ TagName = FName(tag) }, nil, false) end)
             if not ok then
                 log("Ghost hit reaction failed: " .. tostring(err))
+            else
+                clearHitStateLater(ghostHitComp, tag)
             end
             ghostBusyUntil = os.clock() + GHOST_BUSY_S
+        end
+    end
+
+    -- A hit state set by hand has no animation to end it, and while it lasts the character can't start a move
+    -- (a PvP attacker stayed stuck after a parry). Clear it again after a moment, unless something replaced it.
+    local HIT_STATE_HOLD_MS = 900
+    clearHitStateLater = function(comp, tag)
+        local waited = 0
+        LoopInGameThreadWithDelay(100, function()
+            waited = waited + 100
+            if waited < HIT_STATE_HOLD_MS then
+                return false
+            end
+            pcall(function()
+                if comp:GetCurrentHitState().TagName:ToString() == tag then
+                    comp:ChangeHitState({ TagName = FName("None") }, nil, false)
+                end
+            end)
+            return true
+        end)
+    end
+
+    -- PvP: the local player reacts to a hit the game itself didn't deal (a parried swing).
+    function game.staggerSelf(pawn, tag)
+        local comp = hitreactComponent(pawn)
+        if comp and pcall(function() comp:ChangeHitState({ TagName = FName(tag) }, nil, false) end) then
+            clearHitStateLater(comp, tag)
         end
     end
 
@@ -472,9 +509,10 @@ return function(api)
 
     -- Every second (host): the ghost stays at full health, since the remote player's real health lives on
     -- their PC, and enemies close to it add it to their hatred list.
-    function game.ghostAggro(ghost)
+    -- (In PvP the ghost's health shows the remote player's real health instead: pvp.lua sets it.)
+    function game.ghostAggro(ghost, pvp)
         local _, maxhp = game.getHealth(ghost)
-        if maxhp then
+        if maxhp and not pvp then
             game.setHealth(ghost, maxhp)
         end
         local g = ghost:K2_GetActorLocation()
@@ -699,6 +737,41 @@ return function(api)
             actor:K2_SetActorLocationAndRotation(t.Translation, { Pitch = 0.0, Yaw = yaw, Roll = 0.0 }, false, {}, true)
         end
         return actor
+    end
+
+    -- unlockall: every weapon and Phantom Edge weapon into the backpack, for testing moves and skills (PvP).
+    -- Weapon ids are the folder names under the player's ability assets (WoodenSword, IronBlade, ...; Phantom
+    -- Edge ones under ShachiAbility), read from the asset registry. Changes the save: test saves only.
+    game.commands.unlockall = function()
+        local _, pawn = api.getPlayer1()
+        local bp = lib("/Script/Engine.Default__SubsystemBlueprintLibrary"):GetWorldSubsystem(pawn,
+            StaticFindObject("/Script/ProjectPBZ.PBZBackPackSubsystem"))
+        local ar = lib("/Script/AssetRegistry.Default__AssetRegistryHelpers"):GetAssetRegistry()
+        local root = "/PBZCombatAsset/ActorData/Players/Hun/Abilities"
+        local notWeapons = { BreakEscape = true, Common = true, GameplayBlocker = true, HorseCart = true,
+            Passive = true, ShachiAbility = true, SpecialMove = true, Tutorial = true, Unarm = true }
+        local function folders(path)
+            local paths, out = {}, {}
+            ar:GetSubPaths(path, paths, false)
+            for _, v in ipairs(paths) do
+                local s = v:get()
+                s = (type(s) == "string" and s or s:ToString()):match("([^/]+)$")
+                out[#out + 1] = s
+            end
+            return out
+        end
+        for _, id in ipairs(folders(root)) do
+            if not notWeapons[id] and not id:find("^Temp_") then
+                pcall(function() bp:AddWeaponItem(FName(id), true, false, false, false) end)
+            end
+        end
+        for _, id in ipairs(folders(root .. "/ShachiAbility")) do
+            pcall(function() bp:AddWeaponItem(FName(id), false, false, false, false) end)
+        end
+        local main, edge = 0, 0
+        bp.MainWeaponInfos:ForEach(function() main = main + 1 end)
+        bp.ShaqiWeaponInfos:ForEach(function() edge = edge + 1 end)
+        log(string.format("Unlocked: %d weapons, %d Phantom Edge weapons.", main, edge))
     end
 
     -- spawnenemy <codex row> [distance cm]: spawn one of the game's enemies in front of player 1.

@@ -706,7 +706,7 @@ return function(api)
             end)
         end
         if game.ghostAggro and isHost() and valid(net.ghost) and net.seq % AGGRO_EVERY == 0 then
-            game.ghostAggro(net.ghost)
+            game.ghostAggro(net.ghost, net.pvp)
         end
     end
 
@@ -867,6 +867,9 @@ return function(api)
         applyRemoteEnemies(pawn:K2_GetActorLocation())
     end
 
+    -- Other modules (pvp.lua) run here every tick while sync is on: name -> function.
+    local extraTicks = {}
+
     local function tick()
         if not net.enabled then
             return
@@ -881,6 +884,9 @@ return function(api)
             end
         end
         runStage("steerGhost", steerGhost)
+        for name, fn in pairs(extraTicks) do
+            runStage(name, fn)
+        end
     end
 
     -- Everything runs in one loop on the game thread (LoopInGameThreadWithDelay). Never hot-reload the mod
@@ -903,6 +909,9 @@ return function(api)
 
     return {
         net = net,
+        handlers = handlers,       -- event type -> function(rest); other modules add their own types
+        extraTicks = extraTicks,
+        isHost = isHost,
         sendEvent = sendEvent,
         reportHit = reportHit,
         reportPickup = reportPickup,

@@ -431,6 +431,7 @@ local api = {
 api.game = dofile(SCRIPT_DIR .. "pbz.lua")(api)
 local coop = dofile(SCRIPT_DIR .. "coop.lua")(api)
 api.coop = coop
+api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
 local net = coop.net
 
 -- Helpers for the "eval" command, so test snippets can reuse the mod's functions.
@@ -478,6 +479,7 @@ end
 for name, fn in pairs(api.game.commands or {}) do
     COMMANDS[name] = fn
 end
+COMMANDS.pvp = api.pvp.command
 
 local function readCommandFile()
     local path = modDir() .. "cmd.txt"

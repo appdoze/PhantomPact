@@ -34,6 +34,20 @@ The UE4SS console shows `Phantom Pact Host: co-op on` (or Guest), and
 - **Playing alone:** set `Role = Off`.
 - **Uninstalling:** delete the `platform\steam\ue4ss\Mods\PBZCoop` folder.
 
+## PvP (duels)
+
+Both players set `PvP = On` in `PhantomPact.ini`. Your partner becomes an opponent you can fight:
+
+- Their attacks hit you through the game's own combat: **block** (hold the guard button) costs posture,
+  a well-timed **parry** (tap guard just before the hit) costs nothing, and dodges work as usual.
+- A parry is rewarded like against a boss: the attacker staggers and loses posture (`PvPParryPosture`, default 60).
+- Duels, not deaths: reaching 1 health loses the round. Both players heal after 3 seconds and the score
+  is shown in the UE4SS console (`PvP: you WON the round. Score 1 - 0.`). No dust is lost.
+- Both players fight with the same strength (your partner's ghost uses your stats), so skill decides.
+  `PvPDamage` scales the damage you take (100 = normal).
+
+Not in PvP yet: executions (posture break only staggers), and you don't see your partner's guard pose.
+
 ## Good to know
 
 - The host should lead into new areas and boss arenas; the guest follows.

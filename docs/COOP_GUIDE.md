@@ -161,3 +161,36 @@ boss from its spawner and the bot engaged it as `sp:ZuoShangyoung_Seq003`, takin
 - World subsystems aren't found by `FindFirstOf`; use `SubsystemBlueprintLibrary:GetWorldSubsystem`.
   `PBZSpawnSubsystem` doesn't exist on the prologue map; enemies are spawned by class from the codex table.
 - `DataTable:FindRow` / `ForEachRow` work in this UE4SS; codex rows give each enemy's class and boss flag.
+
+## PvP (`pvp.lua`, `PvP = On`)
+
+**Who decides a hit: the defender.** In each world the partner's ghost is made hostile to the local player
+(`FactionComponent:SetFactionRelationOverride(other, Hostile=2, true)` on both) and gets a full stat block
+(the ghost spawns with 0/0 health, which counts as dead; it gets a copy of the local player's 223 attributes,
+so both fighters are equal, Attack scaled by `PvPDamage`). Its replayed moves then hit the local player through
+the game's own combat: damage, posture, hit reactions, block, deflect and perfect dodge all apply natively. Your
+hits on the ghost in your own world are only for show; they land in the partner's world.
+
+- **Duels:** `Health_Min = 1` while PvP is on, so health stops at 1. Reaching it sends `V lose`; both sides
+  pause 3 s (not hostile), heal, and count the score.
+- **Parry reward:** the game's deflect leaves the attacker untouched, so the mod judges it on the defender's side:
+  the guard (`GA_Hun_*_Stance`, right mouse) was up during the ghost's attack, the defender was within 3.5 m, and
+  the swing cost neither health nor posture (a held block costs posture). Then `V parry <posture>`: the attacker
+  loses posture and gets a heavy hit reaction (`CharacterState.Hitreact.State.Normal.Heavy`).
+- **Hit states set by hand must be cleared** (`clearHitStateLater`, 0.9 s): without the animation that normally
+  ends them, a character stays in the hit state and can't start any move (a parried attacker and the ghost both
+  got stuck in testing).
+- **Other weapons:** a move of a weapon the local player doesn't carry isn't in memory; `playMove` loads it with
+  `LoadAsset(classPath)` once. (`KismetSystemLibrary:LoadClassAsset_Blocking` with a hand-built soft path broke
+  the mod's command loop; don't.)
+- **Attack values far from normal break hits:** Attack 1500 on the ghost made its swings stop registering.
+- **Test command `unlockall`:** every weapon (13) and Phantom Edge weapon (20) into the backpack. Weapon ids are
+  the folder names under `/PBZCombatAsset/ActorData/Players/Hun/Abilities` (Phantom Edge: `.../ShachiAbility`),
+  read with the asset registry (`GetSubPaths`); `ApplyForcedWeaponLoadout(id, level, false)` equips one.
+
+**Tests (two copies, attacks triggered through the mod, defender with real input):** plain hit 850 -> 786, held
+block (no damage, posture 300 -> 209), timed parry rewarded (tap 150 ms after the swing arrives; attacker posture
+300 -> 240, attacker recovers), Iron Blade light (-64) and heavy (-83) attacks, round end (loser stays alive,
+`WON`/`lost` on both, both heal). Not done yet: executions (the ghost's posture is kept full), showing the
+partner's guard pose (the ghost can't play `GA_Hun_Young_Stance`), Phantom Edge weapons and weapon skills like
+`GA_Hun_Iron_C` (activates but didn't hit; may not be a strike).

@@ -126,6 +126,15 @@ return function(api)
                 on = true
                 neton(modRole)
                 log("Phantom Pact " .. (modRole == "host" and "Host" or "Guest") .. ": co-op on.")
+                if (settings.pvp or ""):lower() == "on" and api.pvp then
+                    if tonumber(settings.pvpdamage) then
+                        api.pvp.command("damage " .. settings.pvpdamage)
+                    end
+                    if tonumber(settings.pvpparryposture) then
+                        api.pvp.command("parry " .. settings.pvpparryposture)
+                    end
+                    api.pvp.set(true)
+                end
             end
         end)
         return false
