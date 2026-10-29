@@ -27,7 +27,7 @@ To uninstall: delete the ue4ss\Mods\PBZCoop folder from the game folder.
 
 ## Main features
 
-See your partner’s Hun live, with their moves, attacks, dodges and hit reactions
+See your partner’s Soul live, with their moves, attacks, dodges and hit reactions
 Shared enemies: the same enemies in both worlds, with shared health, posture and executions
 Your partner’s hits land in the host’s world, so you can fight the same enemy together
 Shared boss fights: boss health bar and arena fog walls for both players

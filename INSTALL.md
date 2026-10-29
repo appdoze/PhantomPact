@@ -3,10 +3,10 @@
 (The mod's folder and log tag are `PBZCoop`.)
 
 **Found a bug?** Post in the Bugs tab of the mod's Nexus Mods page with what happened (host or client, which
-area or boss), your `ue4ss\UE4SS.log` and `ue4ss\Mods\PBZCoop\net_status.txt`. Testers with access to the
-GitHub repo can open an issue with the Bug report template instead.
+area or boss), your `ue4ss\UE4SS.log` and `ue4ss\Mods\PBZCoop\net_status.txt`, or open an issue at
+https://github.com/yhsharaf/PhantomPact/issues (Bug report template).
 
-Play the campaign with a friend: you see each other as a second Hun, fight the same enemies and bosses, and
+Play the campaign with a friend: you see each other as a second Soul, fight the same enemies and bosses, and
 share loot, dust and bell rests. The host's game decides enemies, bosses and deaths; the friend's game follows.
 
 Fan-made, unofficial. Each player needs their own copy of PBZ on Steam. No game files are modified or shared.
@@ -56,7 +56,7 @@ If the game isn't found (an unusual Steam setup), run the scripts from PowerShel
 ## Troubleshooting
 
 - **"Phantom Blade Zero is already running"** when testing two copies on one PC: start the second copy with
-  the game's own launch option `-allowmultipleinstances` (`tools\pbz-selftest.ps1` does this).
+  the game's own launch option `-allowmultipleinstances`.
 - **No `[PBZCoop] Loaded` line**: check `ue4ss\Mods\mods.txt` contains `PBZCoop : 1` (install-mod adds it).
 - **Never press Ctrl+R (UE4SS hot reload) while co-op is on**: it can crash the game. Restart the game instead.
 - **`connected=no`**: check both are on Tailscale, the IP is right, and Windows Firewall allows Python on

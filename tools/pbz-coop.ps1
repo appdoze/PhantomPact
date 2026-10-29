@@ -43,7 +43,7 @@ if (-not $GameWin64) {
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $statePath = Join-Path $projectRoot 'logs\coop-last.json'
 $modDir = Join-Path $GameWin64 'ue4ss\Mods\PBZCoop'
-. (Join-Path $PSScriptRoot 'game-driver.ps1') -GameWin64 $GameWin64 -ProcessName 'PBZ'
+. (Join-Path $PSScriptRoot 'mod-link.ps1') -GameWin64 $GameWin64 -ProcessName 'PBZ'
 
 # The relay this script started last time (logs\coop-last.json), if it's still running. Only a Python process
 # counts: after a reboot the same PID can belong to something else.

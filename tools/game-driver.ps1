@@ -32,12 +32,8 @@ Add-Type -AssemblyName System.Drawing, System.Windows.Forms
 # Without this, window coordinates come back scaled on high-DPI screens and captures are misaligned.
 [GameDriver.Native]::SetProcessDPIAware() | Out-Null
 
-$script:GameWin64 = $GameWin64
-$script:ProcessName = $ProcessName
-$script:LogPath = Join-Path $GameWin64 'ue4ss\UE4SS.log'
-$script:CmdPath = Join-Path $GameWin64 'ue4ss\Mods\PBZCoop\cmd.txt'
-
-$script:TargetPid = 0
+# Window lookup, mod commands and log reading (the part the player scripts use on their own).
+. (Join-Path $PSScriptRoot 'mod-link.ps1') -GameWin64 $GameWin64 -ProcessName $ProcessName
 
 # Two copies on one PC: point the driver at one of them. Instance 1 uses the mod folder, N > 1 uses instN\.
 function Select-GameInstance {
@@ -46,14 +42,6 @@ function Select-GameInstance {
     $modDir = Join-Path $script:GameWin64 'ue4ss\Mods\PBZCoop'
     if ($Instance -gt 1) { $modDir = Join-Path $modDir "inst$Instance" }
     $script:CmdPath = Join-Path $modDir 'cmd.txt'
-}
-
-function Get-GameWindow {
-    $procs = Get-Process -Name $script:ProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }
-    if ($script:TargetPid) { $procs = $procs | Where-Object { $_.Id -eq $script:TargetPid } }
-    $p = $procs | Select-Object -First 1
-    if (-not $p) { return [IntPtr]::Zero }
-    return $p.MainWindowHandle
 }
 
 function Show-Game {
@@ -122,31 +110,4 @@ function Restart-Game {
         Start-Sleep -Seconds 3
     } until ((Get-GameWindow) -ne [IntPtr]::Zero -or (Get-Date) -gt $deadline)
     if ((Get-GameWindow) -eq [IntPtr]::Zero) { throw "Game window did not appear within $TimeoutSec s" }
-}
-
-# Poll the mod with a "where" command until it reports player 1, i.e. gameplay is loaded.
-function Wait-Gameplay {
-    param([int]$TimeoutSec = 90)
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    do {
-        $t0 = Get-Date
-        Send-ModCommand 'where'
-        Start-Sleep -Seconds 3
-        if (Get-ModLog -Since $t0 | Where-Object { $_ -match 'P1 at' }) { return $true }
-    } until ((Get-Date) -gt $deadline)
-    return $false
-}
-
-function Send-ModCommand {
-    param([Parameter(Mandatory = $true)][string[]]$Command)
-    [IO.File]::WriteAllText($script:CmdPath, ($Command -join "`n"))
-}
-
-function Get-ModLog {
-    param([datetime]$Since = (Get-Date).AddMinutes(-2), [int]$Last = 200)
-    if (-not (Test-Path $script:LogPath)) { return }
-    $fs = [IO.File]::Open($script:LogPath, 'Open', 'Read', 'ReadWrite')
-    $text = (New-Object IO.StreamReader $fs).ReadToEnd(); $fs.Dispose()
-    $text -split "`r?`n" | Where-Object { $_ -match '^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)' -and [datetime]$matches[1] -ge $Since.AddSeconds(-1) -and $_ -match 'PBZCoop|Lua.*error' } |
-        Select-Object -Last $Last
 }

@@ -13,7 +13,7 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 
 ## Features
 
-- See your partner's Hun live, with their moves, attacks, dodges and hit reactions
+- See your partner's Soul live, with their moves, attacks, dodges and hit reactions
 - Shared enemies in both worlds, with shared health, posture and executions
 - Your partner's hits count in the host's world, so you can fight the same enemy together
 - Shared boss fights: the boss health bar and arena fog walls for both players
