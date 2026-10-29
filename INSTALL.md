@@ -1,4 +1,4 @@
-# Phantom Pact 1.0: online co-op for Phantom Blade Zero
+# Phantom Pact 1.1: online co-op for Phantom Blade Zero
 
 Play the campaign with a friend: you see each other as a second Soul, fight the same enemies and bosses, and
 share loot, dust and bell rests. The host's world decides enemies, bosses and deaths; the guest's world follows.
