@@ -19,6 +19,8 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 - Shared boss fights: the boss health bar and arena fog walls for both players
 - Shared loot and dust: what either player picks up or earns goes to both
 - Shared resting: rest at a bell and enemies respawn for both
+- Elden Ring–style co-op difficulty: enemies and bosses get more health and posture while you play together
+- PvP duels (`PvP = On`): the game's own block, parry and dodge; parries stagger the attacker; the loser dies
 
 ## Quick start
 

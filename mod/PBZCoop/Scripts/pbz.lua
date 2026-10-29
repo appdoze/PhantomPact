@@ -330,10 +330,15 @@ return function(api)
 
     ------------------------------------------------------------------ moves (attacks, dodges, parries)
 
+    -- pcall: for a frame while the game swaps the player (loading, respawn) this call failed once with "UFunction
+    -- expected 1 parameters, received 3"; no ability system this tick, try again next one.
     local function abilitySystem(actor)
         local bl = lib("/Script/GameplayAbilities.Default__AbilitySystemBlueprintLibrary")
-        local asc = valid(bl) and bl:GetAbilitySystemComponent(actor) or nil
-        return valid(asc) and asc or nil
+        if not valid(bl) or not valid(actor) then
+            return nil
+        end
+        local ok, asc = pcall(function() return bl:GetAbilitySystemComponent(actor) end)
+        return (ok and valid(asc)) and asc or nil
     end
 
     local function forEachSpec(asc, fn)

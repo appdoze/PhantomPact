@@ -34,6 +34,12 @@ The UE4SS console shows `Phantom Pact Host: co-op on` (or Guest), and
 - **Playing alone:** set `Role = Off`.
 - **Uninstalling:** delete the `platform\steam\ue4ss\Mods\PBZCoop` folder.
 
+## Co-op difficulty
+
+Like Elden Ring, enemies and bosses get tougher while your partner is with you: 150% health and 130% posture by
+default. Change `CoopEnemyHealth` / `CoopEnemyPosture` in `PhantomPact.ini` (percent; 100 = normal). Both
+players should use the same numbers.
+
 ## PvP (duels)
 
 Both players set `PvP = On` in `PhantomPact.ini`. Your partner becomes an opponent you can fight:

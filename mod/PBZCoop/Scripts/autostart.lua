@@ -126,6 +126,10 @@ return function(api)
                 on = true
                 neton(modRole)
                 log("Phantom Pact " .. (modRole == "host" and "Host" or "Guest") .. ": co-op on.")
+                if api.scaling and (tonumber(settings.coopenemyhealth) or tonumber(settings.coopenemyposture)) then
+                    api.scaling.command(string.format("%d %d", tonumber(settings.coopenemyhealth) or 150,
+                        tonumber(settings.coopenemyposture) or 130))
+                end
                 if (settings.pvp or ""):lower() == "on" and api.pvp then
                     if tonumber(settings.pvpdamage) then
                         api.pvp.command("damage " .. settings.pvpdamage)

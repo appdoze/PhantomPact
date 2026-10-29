@@ -174,7 +174,18 @@ hits on the ghost in your own world are only for show; they land in the partner'
 - **Deaths are real** (since 1.1.1; 1.1.0 held health at 1 with `Health_Min`): a death within 8 s of the partner's
   last hit sends `V lose` and counts as their win; dying to an enemy doesn't. The prologue area never lets the
   player die (`GA_Tutorial_Health_Passive` heals from ~0 to ~690 in 1.5 s), so there the kill is scored but
-  nobody respawns; a real death + bell respawn (and whether it refreshes enemies) is still untested.
+  nobody respawns. With that heal removed (test only), a PvP death did not run the enemy refresh and the
+  partner's enemy stayed alive, but the prologue then never offers a respawn (it isn't built for deaths), so a
+  bell respawn still needs a save past the first bell (this save's revive point is "Start", no bell activated).
+  A killing blow can land within one tick: a partner swing still in progress also counts as their kill.
+
+## Co-op difficulty (`scaling.lua`)
+
+While the partner's ghost is in this world, every enemy is scaled once: `Health_Max`/`Health` by
+`CoopEnemyHealth`% and `Shachi_Max`/`Shachi` by `CoopEnemyPosture`% (default 150/130), keeping its current share.
+Both worlds scale the same enemy by the same factor, so the host's numbers (which the guest's copies follow down)
+match. Tested: one thug 400 -> 600 health and 200 -> 260 posture in both worlds; the guest's hit (-200) reached the
+host and the host's kill reached the guest; co-op e2e still passes.
 - **Relay robustness:** Windows refused a rename once (WinError 1450) and killed the relay; writes now retry and
   skip instead, and the event inbox only acknowledges events it managed to write.
 - **Parry reward:** the game's deflect leaves the attacker untouched, so the mod judges it on the defender's side:

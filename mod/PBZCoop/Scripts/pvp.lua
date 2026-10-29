@@ -113,6 +113,8 @@ return function(api)
 
     local lastPartnerHitAt = -100   -- os.clock() of the partner's last hit on us
     local deathScored = false       -- this death was already reported (until we're alive again)
+    -- One partner swing at a time (watchParry): what we looked like when it started, and whether our guard came up.
+    local swing = nil               -- { hp, posture, guarded, spoiled }
     local function watchDeath(pawn)
         local hp = game.getHealth(pawn)
         local dead = (hp ~= nil and hp <= 0) or game.isDead(pawn)
@@ -122,10 +124,14 @@ return function(api)
         end
         if not deathScored then
             deathScored = true
-            if os.clock() - lastPartnerHitAt <= KILL_WINDOW_S then
+            -- A killing blow from full-ish health can land and kill within one tick, before watchParry noted the
+            -- hit: a partner swing in progress counts as their hit too.
+            if swing ~= nil or os.clock() - lastPartnerHitAt <= KILL_WINDOW_S then
                 coop.sendEvent("V", "lose")
                 scoreRound(false)
             end
+            swing = nil
+            lastPartnerHitAt = -100
         end
     end
 
@@ -156,8 +162,6 @@ return function(api)
             or name:find("Escape"))
     end
 
-    -- One partner swing at a time: what we looked like when it started, and whether our guard came up during it.
-    local swing = nil               -- { hp, posture, guarded }
     local function watchParry(pawn, ghost)
         local attacking = false
         for _, name in ipairs(activeMoves(ghost)) do
