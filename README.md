@@ -23,9 +23,10 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 ## Quick start
 
 1. Install [UE4SS for Phantom Blade Zero](https://www.nexusmods.com/phantombladezero/mods/5), [Python 3](https://www.python.org/downloads/) and [Tailscale](https://tailscale.com) (both players).
-2. Unzip the release and double-click `1 - Install Phantom Pact.bat`.
-3. Start the game and load your saves, the host first.
-4. Host: `2 - Host.bat`. Partner: `3 - Join friend.bat` with the host's Tailscale IP.
+2. Extract the release zip into the game's `PBZ` folder.
+3. In `platform\steam\ue4ss\Mods\PBZCoop\PhantomPact.ini`: host sets `Role = Host`, guest sets `HostAddress` to
+   the host's Tailscale IP.
+4. Start the game and load your saves, the host first. Co-op starts by itself.
 
 Early release, 2 players. Connecting is over Tailscale for now; Steam joining is planned.
 
@@ -40,14 +41,13 @@ Early release, 2 players. Connecting is over Tailscale for now; Steam joining is
 
 | Path | What it is |
 |---|---|
-| [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `main.lua` (loader, commands) |
+| [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `autostart.lua` (reads `PhantomPact.ini`, starts the relay, turns sync on), `main.lua` (loader, commands) |
 | [net/pbzcoop_net.py](net/pbzcoop_net.py) | Relay over UDP (Tailscale): snapshots + reliable events; host, client, echo, record/replay |
 | [net/test_pbzcoop_net.py](net/test_pbzcoop_net.py) | Relay tests: `python -I net\test_pbzcoop_net.py` |
 | [net/pbzcoop_bot.py](net/pbzcoop_bot.py) | Bot partner for live tests without a second PC |
-| [release/](release/) | The double-click `.bat` files that ship at the top of the zip |
-| [tools/pbz-coop.ps1](tools/pbz-coop.ps1) | Starts co-op on a running game (`-Role host`, `-Role client -Peer <ip>`, `-Stop`) |
+| [tools/pbz-coop.ps1](tools/pbz-coop.ps1) | Developer launcher: relay + `neton` by hand (`-Role host/client/echo/loop/record/replay`, `-Stop`) |
 | [tools/install-mod.ps1](tools/install-mod.ps1) | Installs the mod into the game's UE4SS `Mods` folder (finds the game through Steam) |
-| [tools/pbz-e2e.ps1](tools/pbz-e2e.ps1) | End-to-end test: two copies of the game on one PC, PASS/FAIL per feature |
+| [tools/pbz-e2e.ps1](tools/pbz-e2e.ps1) | End-to-end test: two copies of the game on one PC, PASS/FAIL per feature; `-Auto` tests the player setup (ini, self-started relays) |
 | [tools/pbz-selftest.ps1](tools/pbz-selftest.ps1) | Starts two copies with `-allowmultipleinstances` plus relays; `-Stop` |
 | [tools/make-release.ps1](tools/make-release.ps1) | Builds `dist\PhantomPact-<version>.zip` |
 | [docs/COOP_GUIDE.md](docs/COOP_GUIDE.md) | What syncs and how: protocol, enemy matching, tests and results |

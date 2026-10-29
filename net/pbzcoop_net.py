@@ -229,9 +229,10 @@ class Relay:
         connected = self.peer is not None and now - self.last_heard <= PEER_TIMEOUT
         peer = f"{self.peer[0]}:{self.peer[1]}" if self.peer else "-"
         rtt = f"{self.rtt_ms:.0f}" if self.rtt_ms is not None else "-"
+        # time= (wall clock) lets the mod tell a running relay from a stale status file before starting another.
         return (f"role={self.role} connected={'yes' if connected else 'no'} peer={peer} "
                 f"rtt_ms={rtt} sent={self.sent} received={self.received} "
-                f"events_acked={self.events_acked} events_in={self.inbox.last_id}")
+                f"events_acked={self.events_acked} events_in={self.inbox.last_id} time={int(time.time())}")
 
 
 ECHO_OFFSET_X = 300.0   # cm
@@ -381,6 +382,18 @@ def run_replay(folder, path, seconds, client_log):
         write_atomic(status_path, "role=replay connected=no stopped=yes\n")
 
 
+ALIVE_TIMEOUT = 30.0     # s without a heartbeat from the mod before a relay the mod started gives up
+
+
+def game_alive(path, timeout):
+    """The mod rewrites its heartbeat file (a unix time) every few seconds while the game runs."""
+    try:
+        beat = float(read_text(path).strip() or 0)
+    except ValueError:
+        return True       # caught mid-write
+    return time.time() - beat <= timeout
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("role", choices=["host", "client", "echo", "record", "replay"])
@@ -390,6 +403,9 @@ def main():
     ap.add_argument("--peer", help="host's Tailscale IP (client only)")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--seconds", type=float, default=0, help="stop after this long (0 = run until Ctrl+C)")
+    ap.add_argument("--alive-file", help="stop once this file (the mod's heartbeat: a unix time) is older than "
+                                         "--alive-timeout, i.e. the game was closed")
+    ap.add_argument("--alive-timeout", type=float, default=ALIVE_TIMEOUT)
     args = ap.parse_args()
     if args.role == "client" and not args.peer:
         ap.error("client needs --peer <host IP>")
@@ -420,6 +436,9 @@ def main():
                 print(line, flush=True)
                 last_status = now
             if args.seconds and now - start >= args.seconds:
+                break
+            if args.alive_file and not game_alive(args.alive_file, args.alive_timeout):
+                print("the game's heartbeat stopped: game closed, relay exiting", flush=True)
                 break
             relay.wait(TICK)
     except KeyboardInterrupt:

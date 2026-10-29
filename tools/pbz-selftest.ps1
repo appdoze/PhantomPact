@@ -17,6 +17,8 @@ param(
     # Only start the two relays (host on the mod folder, client on inst2\): for a copy you started yourself in a
     # second Windows user session (whose user has PBZCOOP_INSTANCE=2 set), next to the one in this session.
     [switch]$RelaysOnly,
+    # Only start the two copies: the mod starts its own relays from PhantomPact.ini (auto-start test).
+    [switch]$NoRelays,
     [string]$Exe,
     [string]$SteamLibrary = 'D:\SteamLibrary',
     [int]$SteamAppId = 4115450,
@@ -141,9 +143,11 @@ if ($RelaysOnly) {
 
 $relayPy = Join-Path $projectRoot 'net\pbzcoop_net.py'
 $relays = @()
+if (-not $NoRelays) {
 $relays += (Start-Process $py -ArgumentList '-I', "`"$relayPy`"", 'host', '--dir', "`"$modRoot`"", '--port', $Port -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runDir 'relay-host.log')).Id
 if ($pid2) {
     $relays += (Start-Process $py -ArgumentList '-I', "`"$relayPy`"", 'client', '--dir', "`"$inst2`"", '--peer', '127.0.0.1', '--port', $Port -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runDir 'relay-client.log')).Id
+}
 }
 
 @{ Games = @($pid1, $pid2) | Where-Object { $_ -gt 0 }; Relays = $relays; RunDir = $runDir; Exe = $Exe } |

@@ -425,6 +425,7 @@ local api = {
     fmtVec = fmtVec,
     distance = distance,
     modDir = modDir,
+    modRoot = modRoot,
     spawnBesidePlayer1 = spawnBesidePlayer1,
 }
 api.game = dofile(SCRIPT_DIR .. "pbz.lua")(api)
@@ -534,3 +535,9 @@ LoopAsync(500, function()
 end)
 
 log("Loaded (instance " .. INSTANCE .. ", v" .. VERSION .. ", files in " .. modDir() .. "). F6 info | F7 nearby" .. (DEV_KEYS and " | F8 P2 clone | F9 remove P2 | F10 P2 controller only | F11 P2 plain pawn" or "") .. " | cmd.txt enabled")
+
+-- PhantomPact.ini: start the relay and turn co-op on by itself (Role = Host/Guest; Off leaves it to neton).
+local okAuto, errAuto = pcall(function() dofile(SCRIPT_DIR .. "autostart.lua")(api) end)
+if not okAuto then
+    log("Auto-start error: " .. tostring(errAuto))
+end
