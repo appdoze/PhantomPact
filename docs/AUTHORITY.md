@@ -89,6 +89,17 @@ real respawn:
   so this needs a later save to check.
 - whether a boss killed by reported damage counts as beaten for the host's save
 
+## Executions and late joins
+
+- **Executions** (`GA_SimpleExecution_Young` and the other execution abilities) aren't sent as moves. Only
+  `GA_Hun_*` moves are, so the ghost never replays one. A paired execution animation would grab the other world's
+  copy of the enemy and could hit it a second time. The partner sees the enemy fall when the host's `K` arrives.
+  Measured: five client swings took a thug from 600 to 68 in both worlds, with five reports and five applied.
+- **Joining late or rejoining:** events are kept for the whole host session and resent until the client acks them.
+  A client that rejoins with its inbox on disk only plays what it hasn't seen. A first join mid-session plays the
+  host's whole backlog once: deaths (`K`), rests, shared items and dust from before it joined. That's the same
+  "shared rewards" rule, applied late, not a duplicate.
+
 ## Known limits
 
 - If both players swing at the same enemy within the same 1.5 s in PvP, the ghost's replay can't be told from your
