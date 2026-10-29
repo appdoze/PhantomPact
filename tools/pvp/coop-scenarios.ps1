@@ -125,7 +125,7 @@ Check "boss bar was shown on the client" ([bool]($log -match '\[PBZCoop#2\] Show
 
 # --- spectating: the client's player goes down (tutorial heal off), its camera follows the host, then returns.
 $noHeal = "eval local _,p=PBZ.getPlayer1() local asc=StaticFindObject('/Script/GameplayAbilities.Default__AbilitySystemBlueprintLibrary'):GetAbilitySystemComponent(p) local h asc.ActivatableAbilities.Items:ForEach(function(_,e) local s=e:get() if s.Ability:IsValid() and s.Ability:GetClass():GetFName():ToString()=='GA_Tutorial_Health_Passive_C' then h=s.Handle end end) if h then asc:ClearAbility(h) end return 'heal off'"
-$view = "eval local pc,p=PBZ.getPlayer1() local v=pc:GetViewTarget() local g=PBZ.net.ghost return 'VIEW '..((g and g:IsValid() and v:GetAddress()==g:GetAddress()) and 'ghost' or (v:GetAddress()==p:GetAddress() and 'self' or 'other'))"
+$view = "eval local pc,p=PBZ.getPlayer1() local v=pc:GetViewTarget() return 'VIEW '..((PBZ.game.isSpectating() and v:GetAddress()~=p:GetAddress()) and 'ghost' or (v:GetAddress()==p:GetAddress() and 'self' or 'other'))"
 Q 2 $noHeal | Out-Null
 $ts = Get-Date
 Q 2 "eval local _,p=PBZ.getPlayer1() PBZ.game.setHealth(p,0) return 'down'" 5 | Out-Null

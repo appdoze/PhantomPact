@@ -838,12 +838,40 @@ return function(api)
     -- While the local player is dead, the camera can follow the other player's ghost. The game's death screen is
     -- dimmed, not removed or hidden (it drives the respawn: removing it runs Refresh Monster, and a hidden widget
     -- may stop ticking), and comes back the moment we stop.
+    -- The view comes from a camera of our own placed behind and above the partner every frame, looking at them:
+    -- the ghost's own camera can't be used (it follows a controller the ghost doesn't have, so it sat in the
+    -- bamboo looking nowhere).
     local spectating = nil        -- the actor the camera follows, or nil
+    local spectateCam = nil
     local DEATH_SCREEN_DIM = 0.25
+    local CAM_BACK_CM, CAM_UP_CM, CAM_FOLLOW = 380, 170, 0.12   -- behind, above, fraction of the way per frame
 
     local function deathScreen(pawn)
         local ok, w = pcall(function() return pawn["Death Widget"] end)
         return (ok and valid(w)) and w or nil
+    end
+
+    local function camSpot(target)
+        local l = target:K2_GetActorLocation()
+        local yaw = math.rad(target:K2_GetActorRotation().Yaw)
+        return { X = l.X - math.cos(yaw) * CAM_BACK_CM, Y = l.Y - math.sin(yaw) * CAM_BACK_CM, Z = l.Z + CAM_UP_CM }, l
+    end
+
+    local function aim(from, at)
+        local dx, dy, dz = at.X - from.X, at.Y - from.Y, (at.Z + 60) - from.Z
+        return { Pitch = math.deg(math.atan(dz, math.sqrt(dx * dx + dy * dy))), Yaw = math.deg(math.atan(dy, dx)), Roll = 0.0 }
+    end
+
+    local function followFrame()
+        if not (spectating and valid(spectating) and valid(spectateCam)) then
+            return
+        end
+        local want, at = camSpot(spectating)
+        local cur = spectateCam:K2_GetActorLocation()
+        local a = CAM_FOLLOW
+        local pos = { X = cur.X + (want.X - cur.X) * a, Y = cur.Y + (want.Y - cur.Y) * a, Z = cur.Z + (want.Z - cur.Z) * a }
+        spectateCam:K2_SetActorLocationAndRotation(pos, aim(pos, at), false, {}, true)
+        game.after(0.016, followFrame)
     end
 
     function game.spectate(target)
@@ -855,12 +883,37 @@ return function(api)
         if (follow and spectating and follow:GetAddress() == spectating:GetAddress()) or (not follow and not spectating) then
             return true
         end
-        local ok = pcall(function() pc:SetViewTargetWithBlend(follow or pawn, follow and 1.0 or 0.4, 0, 0, false) end)
+        local ok = true
+        if follow then
+            if not valid(spectateCam) then
+                local spot, at = camSpot(follow)
+                local gs = api.gs()
+                local t = { Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 }, Translation = spot, Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 } }
+                ok = pcall(function()
+                    local cam = gs:BeginDeferredActorSpawnFromClass(pc, StaticFindObject("/Script/Engine.CameraActor"), t,
+                        SPAWN_ADJUST_ALWAYS, nil, SCALE_MULTIPLY_WITH_ROOT)
+                    spectateCam = gs:FinishSpawningActor(cam, t, SCALE_MULTIPLY_WITH_ROOT)
+                    spectateCam:K2_SetActorLocationAndRotation(spot, aim(spot, at), false, {}, true)
+                end) and valid(spectateCam)
+            end
+            ok = ok and pcall(function() pc:SetViewTargetWithBlend(spectateCam, 1.0, 0, 0, false) end)
+        else
+            ok = pcall(function() pc:SetViewTargetWithBlend(pawn, 0.4, 0, 0, false) end)
+            if valid(spectateCam) then
+                local cam = spectateCam
+                game.after(0.5, function() if valid(cam) and cam ~= spectateCam then cam:K2_DestroyActor() end end)
+            end
+            spectateCam = nil
+        end
         local w = deathScreen(pawn)
         if w then
-            pcall(function() w:SetRenderOpacity(follow and DEATH_SCREEN_DIM or 1.0) end)
+            pcall(function() w:SetRenderOpacity(follow and ok and DEATH_SCREEN_DIM or 1.0) end)
         end
-        spectating = ok and follow or nil
+        local wasFollowing = spectating ~= nil
+        spectating = (ok and follow) or nil
+        if spectating and not wasFollowing then
+            game.after(0.016, followFrame)
+        end
         return ok
     end
 
