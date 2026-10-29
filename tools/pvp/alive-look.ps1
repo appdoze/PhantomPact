@@ -6,8 +6,8 @@ $run = "$PSScriptRoot\pvp-run.ps1"
 $state = Get-Content "$PSScriptRoot\..\..\logs\selftest-last.json" -Raw | ConvertFrom-Json
 Select-GameInstance -ProcessId @($state.Games)[0] -Instance 1; Show-Game
 Send-ModCommand 'pvp alive'
-Start-Sleep -Milliseconds 750
-Save-GameScreenshot "$Dir\alive-entrance.png" -Scale 0.5 | Out-Null
 Start-Sleep -Milliseconds 1200
+Save-GameScreenshot "$Dir\alive-entrance.png" -Scale 0.5 | Out-Null
+Start-Sleep -Milliseconds 2600              # Deadpopup has settled by about 3.5 s
 Save-GameScreenshot "$Dir\alive-settled.png" -Scale 0.5 | Out-Null
 "shots in $Dir"

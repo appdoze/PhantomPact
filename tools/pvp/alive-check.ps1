@@ -23,7 +23,7 @@ for ($k = 0; $k -lt 40 -and -not $won; $k++) {
     Start-Sleep -Milliseconds 100
     $won = [bool](Get-ModLog -Since $t0 | Where-Object { $_ -match '\[PBZCoop\] PvP: VICTORY' })
 }
-Start-Sleep -Milliseconds 700
+Start-Sleep -Milliseconds 3500              # the death screen's own entrance (Deadpopup) has settled by then
 Save-GameScreenshot $Shot -Scale 0.5 | Out-Null
 "victory logged: $won; screenshot: $Shot"
 Start-Sleep 6

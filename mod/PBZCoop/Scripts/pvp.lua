@@ -128,7 +128,7 @@ return function(api)
             lines[math.random(#lines)], pvp.wins, pvp.losses))
         -- The loser sees the game's own death screen; the winner gets its golden mirror.
         if won and game.showAliveScreen then
-            game.showAliveScreen(4)
+            game.showAliveScreen(6)
         end
     end
 
@@ -311,7 +311,7 @@ return function(api)
         elseif cmd == "off" then
             pvp.set(false)
         elseif cmd == "alive" then
-            log("Victory screen: " .. tostring(game.showAliveScreen and game.showAliveScreen(4)))
+            log("Victory screen: " .. tostring(game.showAliveScreen and game.showAliveScreen(6)))
         elseif cmd == "parry" and tonumber(arg) then
             pvp.parryPosture = math.max(0, math.min(400, tonumber(arg)))
             log(string.format("PvP parry reward: %.0f posture.", pvp.parryPosture))

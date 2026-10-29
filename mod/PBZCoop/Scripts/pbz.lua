@@ -471,22 +471,47 @@ return function(api)
         end
     end
 
+    -- Delayed actions on the game thread. One loop runs them all: a LoopInGameThreadWithDelay callback that returned
+    -- true kept running in this UE4SS (the victory screen's hide timer then failed 300 times on a cleared value), so
+    -- no loop here relies on stopping itself. game.after(seconds, fn) runs fn once; fn may schedule itself again.
+    local timers = {}
+    local schedulerStarted = false
+    function game.after(seconds, fn)
+        timers[#timers + 1] = { at = os.clock() + seconds, fn = fn }
+        if not schedulerStarted then
+            schedulerStarted = true
+            LoopInGameThreadWithDelay(16, function()
+                if #timers == 0 then
+                    return false
+                end
+                local now, due, keep = os.clock(), {}, {}
+                for _, t in ipairs(timers) do
+                    if now >= t.at then
+                        due[#due + 1] = t
+                    else
+                        keep[#keep + 1] = t
+                    end
+                end
+                timers = keep
+                for _, t in ipairs(due) do
+                    local ok, err = pcall(t.fn)
+                    if not ok then
+                        log("Timer error: " .. tostring(err))
+                    end
+                end
+                return false
+            end)
+        end
+    end
+
     -- A hit state set by hand has no animation to end it, and while it lasts the character can't start a move
     -- (a PvP attacker stayed stuck after a parry). Clear it again after a moment, unless something replaced it.
-    local HIT_STATE_HOLD_MS = 900
+    local HIT_STATE_HOLD_S = 0.9
     clearHitStateLater = function(comp, tag)
-        local waited = 0
-        LoopInGameThreadWithDelay(100, function()
-            waited = waited + 100
-            if waited < HIT_STATE_HOLD_MS then
-                return false
+        game.after(HIT_STATE_HOLD_S, function()
+            if comp:GetCurrentHitState().TagName:ToString() == tag then
+                comp:ChangeHitState({ TagName = FName("None") }, nil, false)
             end
-            pcall(function()
-                if comp:GetCurrentHitState().TagName:ToString() == tag then
-                    comp:ChangeHitState({ TagName = FName("None") }, nil, false)
-                end
-            end)
-            return true
         end)
     end
 
@@ -505,6 +530,7 @@ return function(api)
     -- death flow's "Refresh Monster" (enemies respawn), so it must never be removed. It ignores clicks and isn't
     -- activated, so it takes no input; its Return-to-menu button is hidden.
     local aliveScreen = nil
+    local aliveScreenPainted = false
     local aliveHideAt = nil
     local GOLD = { R = 1.0, G = 0.72, B = 0.22, A = 1.0 }
 
@@ -522,16 +548,41 @@ return function(api)
         w:AddToViewport(500)
         local function try(f) pcall(f) end
         try(function() w:StopAllAnimations() end)
-        for _, n in ipairs({ "yun", "ming", "Image_89", "ReturnButton", "DiedTimeBox", "Image_48", "NumText" }) do
-            try(function() w[n]:SetVisibility(1) end)         -- 殒命, DEAD, Return button, days counter
+        -- 殒命, DEAD, Return button, days counter, and the blood: the victory screen is clean gold on dark.
+        for _, n in ipairs({ "yun", "ming", "Image_89", "ReturnButton", "DiedTimeBox", "Image_48", "NumText",
+            "Blood1", "Blood2" }) do
+            try(function() w[n]:SetVisibility(1) end)
         end
-        for _, n in ipairs({ "Blood1", "Blood2" }) do
-            try(function() w[n]:SetRenderOpacity(0.3) end)    -- the blood stays, faint: gold on a bloodbath
-        end
-        try(function() w.red:SetRenderOpacity(0.6) end)
-        -- 生 over 还 (simplified, like the screen's own 殒命; the brush font has no traditional 還), written in
-        -- the game's ink-brush font, standing where 殒命 was.
+        try(function() w.red:SetRenderOpacity(0.5) end)       -- the dark backdrop stays, softer
+        -- 生 over 还: a gilded ink-brush painting (art/shenghuan.png, painted in Lumina after the screen's own
+        -- 殒命), shown in 殒's image slot. 命's slot stays hidden: the two slots overlap by design.
+        aliveScreenPainted = false
         try(function()
+            local tex = lib("/Script/Engine.Default__KismetRenderingLibrary"):ImportFileAsTexture2D(pc,
+                api.modRoot() .. "art/shenghuan.png")
+            if valid(tex) then
+                w.yun:SetBrushFromTexture(tex, false)
+                local b = w.yun.Brush
+                b.ImageSize = { X = 380, Y = 380 * tex:Blueprint_GetSizeY() / tex:Blueprint_GetSizeX() }
+                w.yun:SetBrush(b)
+                -- 殒's slot is offset upward for 殒命's layout; the two stacked characters sit centered without it.
+                -- Nudged right: the brush tails sweep out to the right, so the image's middle is right of the
+                -- characters' own middle; this puts the characters over ALIVE.
+                w.yun:SetRenderTranslation({ X = 28, Y = 0 })
+                w.yun:SetColorAndOpacity({ R = 1, G = 1, B = 1, A = 1 })
+                w.yun:SetVisibility(3)
+                aliveScreenPainted = true
+            end
+        end)
+        if aliveScreenPainted then
+            try(function() w.DeadText:SetVisibility(1) end)
+        end
+        -- Without the painting: 生 over 还 in the game's ink-brush font (simplified, like the screen's own 殒命;
+        -- the font has no traditional 還), standing where 殒命 was.
+        try(function()
+            if aliveScreenPainted then
+                return
+            end
             local brush = nil
             for _, f in ipairs(FindAllOf("Font") or {}) do
                 if f:GetFName():ToString() == "BaiGeTianXingTi_small_Font" then
@@ -589,37 +640,42 @@ return function(api)
         end
         showAliveWord(aliveScreen)
         aliveScreen:SetVisibility(3)                          -- HitTestInvisible: seen, never clicked
-        -- The strokes land: 生还 fades in while settling from 125% to full size, then ALIVE fades in.
+        -- The death screen's own entrance (Deadpopup, 5 s): the world darkens and the calligraphy appears exactly
+        -- as 殒命 does. It leaves the hidden parts (DEAD, blood, 命) hidden.
         local w, t = aliveScreen, 0
-        pcall(function()
-            w.DeadText:SetRenderOpacity(0)
-            w.DeadText:SetRenderScale({ X = 1.25, Y = 1.25 })
-            w.DeadRichText:SetRenderOpacity(0)
-        end)
-        LoopInGameThreadWithDelay(16, function()
-            t = t + 0.016
-            local a = math.min(1, t / 0.5)
-            local ease = 1 - (1 - a) * (1 - a)                -- fast landing, soft settle
+        local animated = aliveScreenPainted
+            and pcall(function() w:PlayAnimation(w.Deadpopup, 0, 1, 0, 1, false) end)
+        if not animated then
+            -- Font fallback: the strokes land, 生还 fading in from 125% to full size, then ALIVE fades in.
             pcall(function()
+                w.DeadText:SetRenderOpacity(0)
+                w.DeadText:SetRenderScale({ X = 1.25, Y = 1.25 })
+                w.DeadRichText:SetRenderOpacity(0)
+            end)
+            local start = os.clock()
+            local function frame()
+                t = os.clock() - start
+                local a = math.min(1, t / 0.5)
+                local ease = 1 - (1 - a) * (1 - a)            -- fast landing, soft settle
                 w.DeadText:SetRenderOpacity(ease)
                 local s = 1.25 - 0.25 * ease
                 w.DeadText:SetRenderScale({ X = s, Y = s })
                 w.DeadRichText:SetRenderOpacity(math.max(0, math.min(1, (t - 0.4) / 0.5)))
-            end)
-            return t >= 0.9
-        end)
-        local first = aliveHideAt == nil
-        aliveHideAt = os.clock() + (seconds or 4)
-        if first then
-            LoopInGameThreadWithDelay(200, function()
-                if os.clock() < aliveHideAt then
-                    return false
+                if t < 0.9 then
+                    game.after(0.016, frame)
                 end
-                pcall(function() aliveScreen:SetVisibility(1) end)
-                aliveHideAt = nil
-                return true
-            end)
+            end
+            game.after(0, frame)
         end
+        -- Hidden again after `seconds`; a new win while it shows restarts the clock (only the last timer hides it).
+        aliveHideAt = os.clock() + (seconds or 6)
+        local mine = aliveHideAt
+        game.after(seconds or 6, function()
+            if aliveHideAt == mine then
+                aliveScreen:SetVisibility(1)
+                aliveHideAt = nil
+            end
+        end)
         return true
     end
 
