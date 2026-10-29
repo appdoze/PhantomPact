@@ -70,8 +70,8 @@ for ($k = 0; $k -lt 3 -and -not $round; $k++) {
     & $run -I 1 -Cmd $face -Wait 0.5 | Out-Null
     $t0 = Get-Date
     & $run -I 1 -Cmd (Swing 'GA_Hun_Iron_A_C') -Wait 2 | Out-Null
-    $lines = @(Get-ModLog -Since $t0 | Where-Object { $_ -match 'PvP: you' })
-    if ($lines -match 'PBZCoop#2\].*lost' -and $lines -match 'PBZCoop\].*WON') { $round = $lines }
+    $lines = @(Get-ModLog -Since $t0 | Where-Object { $_ -match 'PvP: (VICTORY|DEFEAT)' })
+    if ($lines -match 'PBZCoop#2\].*DEFEAT' -and $lines -match 'PBZCoop\].*VICTORY') { $round = $lines }
 }
 $d = & $run -I 2 -Cmd 'eval local _,p=PBZ.getPlayer1() return string.format("HP=%.1f dead=%s", PBZ.game.getHealth(p), tostring(PBZ.game.isDead(p)))' -Wait 0.5
 Check 'loser stays alive at 1 health' (($d -join ' ') -match 'dead=false') ($d -join ' ')
