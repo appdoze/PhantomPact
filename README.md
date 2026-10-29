@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="art/phantom-pact-banner-1300x372.png" alt="Phantom Pact: Online Co-op for Phantom Blade Zero" width="100%">
+</p>
+
 # Phantom Pact: online co-op for Phantom Blade Zero (mod folder: PBZCoop)
 
 A fan-made co-op mode for **Phantom Blade Zero** (S-GAME, Unreal Engine 5, PC release **October 29, 2026**).
