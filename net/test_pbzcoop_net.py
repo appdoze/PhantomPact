@@ -138,6 +138,29 @@ class FileReading(unittest.TestCase):
             self.assertTrue(text.startswith("P 1 0 0 0 0 0 0 Map"))
             self.assertIn("E Mob_", text)
 
+    def test_failed_writes_never_crash_and_lose_no_events(self):
+        relay = load_relay_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "net_events_in.txt")
+            real_replace, real_open = relay.os.replace, open
+
+            def refuse(*_):
+                raise OSError(1450, "Insufficient system resources exist to complete the requested service")
+            relay.os.replace = refuse
+            try:
+                self.assertFalse(relay.write_atomic(os.path.join(tmp, "net_in.txt"), "P 1\n"))
+            finally:
+                relay.os.replace = real_replace
+
+            inbox = relay.EventInbox(path)
+            self.assertEqual(inbox.accept("s1", [(1, "1 A x")]), 1)
+            relay.append_lines = lambda *_: False          # the disk refuses this time
+            self.assertEqual(inbox.accept("s1", [(2, "2 K y")]), 1, "a failed write must not be acknowledged")
+            del relay.append_lines                          # back to the module function
+            relay.append_lines = load_relay_module().append_lines
+            self.assertEqual(inbox.accept("s1", [(2, "2 K y")]), 2)
+            self.assertEqual(event_lines(path), ["1 A x", "2 K y"])
+
     def test_partial_last_event_line_is_held_back(self):
         relay = load_relay_module()
         with tempfile.TemporaryDirectory() as tmp:

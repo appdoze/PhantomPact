@@ -1,4 +1,4 @@
-# Phantom Pact 1.1: online co-op for Phantom Blade Zero
+# Phantom Pact 1.1.1: online co-op for Phantom Blade Zero
 
 Play the campaign with a friend: you see each other as a second Soul, fight the same enemies and bosses, and
 share loot, dust and bell rests. The host's world decides enemies, bosses and deaths; the guest's world follows.
@@ -41,8 +41,9 @@ Both players set `PvP = On` in `PhantomPact.ini`. Your partner becomes an oppone
 - Their attacks hit you through the game's own combat: **block** (hold the guard button) costs posture,
   a well-timed **parry** (tap guard just before the hit) costs nothing, and dodges work as usual.
 - A parry is rewarded like against a boss: the attacker staggers and loses posture (`PvPParryPosture`, default 60).
-- Duels, not deaths: reaching 1 health loses the round. Both players heal after 3 seconds and the score
-  is shown in the UE4SS console (`PvP: you WON the round. Score 1 - 0.`). No dust is lost.
+- The loser dies for real and respawns at their bell, as after any death. A kill by your partner is scored
+  in the UE4SS console (`PvP: you WON the duel. Score 1 - 0.`); dying to an enemy doesn't count.
+  (In the prologue area the game won't let you die, so duel there for fun and the score still counts.)
 - Both players fight with the same strength (your partner's ghost uses your stats), so skill decides.
   `PvPDamage` scales the damage you take (100 = normal).
 

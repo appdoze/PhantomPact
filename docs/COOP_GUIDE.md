@@ -171,8 +171,12 @@ so both fighters are equal, Attack scaled by `PvPDamage`). Its replayed moves th
 the game's own combat: damage, posture, hit reactions, block, deflect and perfect dodge all apply natively. Your
 hits on the ghost in your own world are only for show; they land in the partner's world.
 
-- **Duels:** `Health_Min = 1` while PvP is on, so health stops at 1. Reaching it sends `V lose`; both sides
-  pause 3 s (not hostile), heal, and count the score.
+- **Deaths are real** (since 1.1.1; 1.1.0 held health at 1 with `Health_Min`): a death within 8 s of the partner's
+  last hit sends `V lose` and counts as their win; dying to an enemy doesn't. The prologue area never lets the
+  player die (`GA_Tutorial_Health_Passive` heals from ~0 to ~690 in 1.5 s), so there the kill is scored but
+  nobody respawns; a real death + bell respawn (and whether it refreshes enemies) is still untested.
+- **Relay robustness:** Windows refused a rename once (WinError 1450) and killed the relay; writes now retry and
+  skip instead, and the event inbox only acknowledges events it managed to write.
 - **Parry reward:** the game's deflect leaves the attacker untouched, so the mod judges it on the defender's side:
   the guard (`GA_Hun_*_Stance`, right mouse) was up during the ghost's attack, the defender was within 3.5 m, and
   the swing cost neither health nor posture (a held block costs posture). Then `V parry <posture>`: the attacker

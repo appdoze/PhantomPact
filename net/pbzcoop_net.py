@@ -56,21 +56,31 @@ def read_complete_lines(path):
 
 
 def write_atomic(path, text):
+    """Returns False if the file couldn't be written this time; the next tick writes fresh data anyway."""
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    # The mod may have the file open for a moment; retry instead of failing the tick.
-    for _ in range(5):
+    # The mod may have the file open for a moment, and Windows can briefly refuse a rename for other reasons
+    # (WinError 1450 "insufficient system resources" killed a relay mid-session): retry, then skip, never crash.
+    for attempt in range(5):
         try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
             os.replace(tmp, path)
-            return
-        except PermissionError:
-            time.sleep(0.002)
+            return True
+        except OSError:
+            time.sleep(0.002 * (attempt + 1))
+    return False
 
 
 def append_lines(path, lines):
-    with open(path, "a", encoding="utf-8") as f:
-        f.write("".join(line + "\n" for line in lines))
+    """Returns False if the lines couldn't be appended (the caller keeps them and retries next time)."""
+    for attempt in range(5):
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("".join(line + "\n" for line in lines))
+            return True
+        except OSError:
+            time.sleep(0.002 * (attempt + 1))
+    return False
 
 
 def parse_events(text):
@@ -98,16 +108,18 @@ class EventInbox:
     def accept(self, session, events):
         if session != self.session:
             # The peer restarted its mod: start a fresh file so old events aren't replayed.
+            if not write_atomic(self.path, f"S {session}\n"):
+                return self.last_id if self.session == session else 0
             self.session = session
             self.last_id = 0
-            write_atomic(self.path, f"S {session}\n")
-        fresh = []
+        fresh, last = [], self.last_id
         for eid, line in sorted(events):
-            if eid == self.last_id + 1:
+            if eid == last + 1:
                 fresh.append(line)
-                self.last_id = eid
-        if fresh:
-            append_lines(self.path, fresh)
+                last = eid
+        # Only acknowledged once written: if the write fails the peer keeps resending them.
+        if fresh and append_lines(self.path, fresh):
+            self.last_id = last
         return self.last_id
 
 

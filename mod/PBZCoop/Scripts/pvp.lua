@@ -10,8 +10,8 @@
 -- cost you neither health nor posture (a plain block costs posture). Then your partner staggers and loses posture
 -- ("V parry"), and you see their ghost stagger too.
 --
--- Duels, not deaths: while PvP is on, Health_Min keeps your health at 1 or more. Reaching it loses the round
--- ("V lose"); both players heal after a short pause and the score goes up.
+-- Death decides: the loser really dies (and respawns at their bell, as after any death). A death within a few
+-- seconds of your partner's last hit counts as their win ("V lose"); dying to an enemy doesn't.
 
 return function(api)
     local log, valid, getPlayer1, game = api.log, api.valid, api.getPlayer1, api.game
@@ -19,7 +19,7 @@ return function(api)
     local net = coop.net
 
     local HOSTILE = 2               -- ETeamAttitude::Hostile
-    local ROUND_PAUSE_S = 3.0       -- after a round: nobody can hit, then both heal
+    local KILL_WINDOW_S = 8.0       -- a death this soon after the partner's last hit is their kill
     local PARRY_REACH_CM = 350      -- a swing from further away can't have been parried (it missed)
     local STAGGER_TAG = "CharacterState.Hitreact.State.Normal.Heavy"
 
@@ -101,30 +101,31 @@ return function(api)
         return true
     end
 
-    local function healFull(pawn)
-        local _, maxhp = game.getHealth(pawn)
-        if maxhp then
-            game.setHealth(pawn, maxhp)
-        end
-        local mx = attr(pawn, "Shachi_Max")
-        if mx and game.setPosture then
-            game.setPosture(pawn, mx.CurrentValue)
-        end
-    end
-
-    local roundEndsAt = nil         -- os.clock() when the pause after a round ends
-    local function endRound(won)
+    local function scoreRound(won)
         if won then
             pvp.wins = pvp.wins + 1
         else
             pvp.losses = pvp.losses + 1
         end
-        log(string.format("PvP: you %s the round. Score %d - %d.", won and "WON" or "lost", pvp.wins, pvp.losses))
-        roundEndsAt = os.clock() + ROUND_PAUSE_S
-        local _, pawn = getPlayer1()
-        if valid(pawn) and valid(net.ghost) then
-            setHostile(pawn, net.ghost, false)
-            hostileGhost = nil
+        log(string.format("PvP: you %s. Score %d - %d.", won and "WON the duel" or "were killed by your partner",
+            pvp.wins, pvp.losses))
+    end
+
+    local lastPartnerHitAt = -100   -- os.clock() of the partner's last hit on us
+    local deathScored = false       -- this death was already reported (until we're alive again)
+    local function watchDeath(pawn)
+        local hp = game.getHealth(pawn)
+        local dead = (hp ~= nil and hp <= 0) or game.isDead(pawn)
+        if not dead then
+            deathScored = false
+            return
+        end
+        if not deathScored then
+            deathScored = true
+            if os.clock() - lastPartnerHitAt <= KILL_WINDOW_S then
+                coop.sendEvent("V", "lose")
+                scoreRound(false)
+            end
         end
     end
 
@@ -175,7 +176,10 @@ return function(api)
                 end
             end
             -- A hit or a block during the swing settles it: no parry.
-            if (hp and swing.hp and hp < swing.hp - 0.5) or (posture and swing.posture and posture < swing.posture - 0.5) then
+            if hp and swing.hp and hp < swing.hp - 0.5 then
+                swing.spoiled = true
+                lastPartnerHitAt = os.clock()
+            elseif posture and swing.posture and posture < swing.posture - 0.5 then
                 swing.spoiled = true
             end
         end
@@ -198,24 +202,11 @@ return function(api)
         end
         local _, pawn = getPlayer1()
         local ghost = net.ghost
+        if valid(pawn) then
+            watchDeath(pawn)
+        end
         if not (valid(pawn) and valid(ghost)) or net.ghostHidden then
             return
-        end
-        local now = os.clock()
-
-        -- Our health never reaches 0 in a duel.
-        local hmin = attr(pawn, "Health_Min")
-        if hmin and hmin.CurrentValue < 1 then
-            setAttr(pawn, "Health_Min", 1)
-        end
-
-        if roundEndsAt then
-            if now < roundEndsAt then
-                return
-            end
-            roundEndsAt = nil
-            healFull(pawn)
-            log("PvP: next round. Fight!")
         end
 
         if hostileGhost ~= ghost:GetAddress() then
@@ -238,13 +229,6 @@ return function(api)
         if gmax and game.setPosture then
             game.setPosture(ghost, gmax.CurrentValue)
         end
-
-        -- Lost the round?
-        local hp = game.getHealth(pawn)
-        if hp and hp <= 1.01 then
-            coop.sendEvent("V", "lose")
-            endRound(false)
-        end
     end
     coop.extraTicks.pvp = tick
 
@@ -254,7 +238,7 @@ return function(api)
             return
         end
         if kind == "lose" then
-            endRound(true)
+            scoreRound(true)
         elseif kind == "parry" then
             -- Our swing was parried: stagger and lose posture, like a boss whose attack you deflected.
             local amount = math.min(tonumber(arg) or pvp.parryPosture, 400)
@@ -277,9 +261,11 @@ return function(api)
         pvp.on = on
         net.pvp = on
         local _, pawn = getPlayer1()
+        if valid(pawn) then
+            setAttr(pawn, "Health_Min", 0)     -- (1.1.0 duels held health at 1; deaths are real now)
+        end
         if not on then
             if valid(pawn) then
-                setAttr(pawn, "Health_Min", 0)
                 if valid(net.ghost) then
                     setHostile(pawn, net.ghost, false)
                     if game.setupGhost then
@@ -288,7 +274,6 @@ return function(api)
                 end
             end
             hostileGhost = nil
-            roundEndsAt = nil
         end
         log("PvP " .. (on and string.format("ON (damage %d%%). Score %d - %d.", math.floor(pvp.damage * 100 + 0.5), pvp.wins, pvp.losses) or "off."))
     end
