@@ -126,6 +126,10 @@ return function(api)
         local lines = won and WIN_LINES or LOSS_LINES
         log(string.format("PvP: %s %s Score %d - %d.", won and "VICTORY." or "DEFEAT.",
             lines[math.random(#lines)], pvp.wins, pvp.losses))
+        -- The loser sees the game's own death screen; the winner gets its golden mirror.
+        if won and game.showAliveScreen then
+            game.showAliveScreen(4)
+        end
     end
 
     local lastPartnerHitAt = -100   -- os.clock() of the partner's last hit on us
@@ -306,6 +310,8 @@ return function(api)
             pvp.set(true)
         elseif cmd == "off" then
             pvp.set(false)
+        elseif cmd == "alive" then
+            log("Victory screen: " .. tostring(game.showAliveScreen and game.showAliveScreen(4)))
         elseif cmd == "parry" and tonumber(arg) then
             pvp.parryPosture = math.max(0, math.min(400, tonumber(arg)))
             log(string.format("PvP parry reward: %.0f posture.", pvp.parryPosture))

@@ -498,6 +498,131 @@ return function(api)
         end
     end
 
+    ------------------------------------------------------------------ PvP victory screen
+
+    -- The game's own death screen (W_PlayerDead: red 殒命 calligraphy over blood, "DEAD"), turned into a golden
+    -- 生还 / ALIVE for the duel's winner. Made once and only ever shown and hidden: removing this widget runs the
+    -- death flow's "Refresh Monster" (enemies respawn), so it must never be removed. It ignores clicks and isn't
+    -- activated, so it takes no input; its Return-to-menu button is hidden.
+    local aliveScreen = nil
+    local aliveHideAt = nil
+    local GOLD = { R = 1.0, G = 0.72, B = 0.22, A = 1.0 }
+
+    local function makeAliveScreen()
+        local pc = api.getPlayer1()
+        local cls = FindObject("WidgetBlueprintGeneratedClass", "W_PlayerDead_C")
+        if not valid(pc) or not valid(cls) then
+            return nil
+        end
+        local w = lib("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(pc, cls, pc)
+        if not valid(w) then
+            return nil
+        end
+        w:SetVisibility(1)                                    -- collapsed until a duel is won
+        w:AddToViewport(500)
+        local function try(f) pcall(f) end
+        try(function() w:StopAllAnimations() end)
+        for _, n in ipairs({ "yun", "ming", "Image_89", "ReturnButton", "DiedTimeBox", "Image_48", "NumText" }) do
+            try(function() w[n]:SetVisibility(1) end)         -- 殒命, DEAD, Return button, days counter
+        end
+        for _, n in ipairs({ "Blood1", "Blood2" }) do
+            try(function() w[n]:SetRenderOpacity(0.3) end)    -- the blood stays, faint: gold on a bloodbath
+        end
+        try(function() w.red:SetRenderOpacity(0.6) end)
+        -- 生 over 还 (simplified, like the screen's own 殒命; the brush font has no traditional 還), written in
+        -- the game's ink-brush font, standing where 殒命 was.
+        try(function()
+            local brush = nil
+            for _, f in ipairs(FindAllOf("Font") or {}) do
+                if f:GetFName():ToString() == "BaiGeTianXingTi_small_Font" then
+                    brush = f
+                end
+            end
+            w.DeadText:SetText(FText("生\n还"))
+            w.DeadText:SetColorAndOpacity({ SpecifiedColor = GOLD, ColorUseRule = 0 })
+            local f = w.DeadText.Font
+            if brush then
+                f.FontObject = brush
+            end
+            f.Size = 200
+            -- Gilded brushwork: a thin dark-bronze edge around the gold strokes...
+            pcall(function()
+                f.OutlineSettings.OutlineSize = 3
+                f.OutlineSettings.OutlineColor = { R = 0.18, G = 0.08, B = 0.02, A = 0.9 }
+            end)
+            w.DeadText:SetFont(f)
+            -- ...and ink soaking into the paper below them.
+            pcall(function()
+                w.DeadText:SetShadowOffset({ X = 6, Y = 8 })
+                w.DeadText:SetShadowColorAndOpacity({ R = 0.05, G = 0.0, B = 0.0, A = 0.85 })
+            end)
+            w.DeadText:SetAutoWrapText(false)
+            w.DeadText:SetVisibility(3)
+            w.DeadText:GetParent():SetVisibility(3)
+        end)
+        try(function()
+            w.DeadRichText:SetText(FText("A L I V E"))
+            w.DeadRichText:SetDefaultColorAndOpacity({ SpecifiedColor = GOLD, ColorUseRule = 0 })
+        end)
+        return w
+    end
+
+    -- ALIVE sits in a language switcher that shows the localized DEAD image by default: switch to the text,
+    -- every time (the widget can reset it).
+    local function showAliveWord(w)
+        pcall(function()
+            local sw = w.PBZLanguageWidgetSwitcher_31
+            sw:SetVisibility(3)
+            sw:SetRenderOpacity(1)
+            sw:SetActiveWidget(w.DeadRichText)
+            w.DeadRichText:SetVisibility(3)
+            w.DeadRichText:SetRenderOpacity(1)
+        end)
+    end
+
+    function game.showAliveScreen(seconds)
+        if not valid(aliveScreen) then
+            aliveScreen = makeAliveScreen()
+        end
+        if not valid(aliveScreen) then
+            return false
+        end
+        showAliveWord(aliveScreen)
+        aliveScreen:SetVisibility(3)                          -- HitTestInvisible: seen, never clicked
+        -- The strokes land: 生还 fades in while settling from 125% to full size, then ALIVE fades in.
+        local w, t = aliveScreen, 0
+        pcall(function()
+            w.DeadText:SetRenderOpacity(0)
+            w.DeadText:SetRenderScale({ X = 1.25, Y = 1.25 })
+            w.DeadRichText:SetRenderOpacity(0)
+        end)
+        LoopInGameThreadWithDelay(16, function()
+            t = t + 0.016
+            local a = math.min(1, t / 0.5)
+            local ease = 1 - (1 - a) * (1 - a)                -- fast landing, soft settle
+            pcall(function()
+                w.DeadText:SetRenderOpacity(ease)
+                local s = 1.25 - 0.25 * ease
+                w.DeadText:SetRenderScale({ X = s, Y = s })
+                w.DeadRichText:SetRenderOpacity(math.max(0, math.min(1, (t - 0.4) / 0.5)))
+            end)
+            return t >= 0.9
+        end)
+        local first = aliveHideAt == nil
+        aliveHideAt = os.clock() + (seconds or 4)
+        if first then
+            LoopInGameThreadWithDelay(200, function()
+                if os.clock() < aliveHideAt then
+                    return false
+                end
+                pcall(function() aliveScreen:SetVisibility(1) end)
+                aliveHideAt = nil
+                return true
+            end)
+        end
+        return true
+    end
+
     function game.ghostBusy()
         return os.clock() < ghostBusyUntil
     end
