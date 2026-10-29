@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Force $target | Out-Null
 Copy-Item (Join-Path $source '*') $target -Recurse -Force
 # The relay lives in the mod folder; autostart.lua starts it from there (PhantomPact.ini, Role = Host/Guest).
 New-Item -ItemType Directory -Force (Join-Path $target 'relay') | Out-Null
-Copy-Item (Join-Path $PSScriptRoot '..\net\pbzcoop_net.py') (Join-Path $target 'relay') -Force
+Copy-Item (Join-Path $PSScriptRoot '..\net\pbzcoop_net.py'), (Join-Path $PSScriptRoot '..\net\steam_transport.py') (Join-Path $target 'relay') -Force
 
 # This UE4SS build loads the mods listed in mods.txt; without an entry PBZCoop silently doesn't run.
 $modsTxt = Join-Path $modsDir 'mods.txt'

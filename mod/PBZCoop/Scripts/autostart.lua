@@ -60,9 +60,22 @@ return function(api)
         return
     end
     local port = tonumber(settings.port) or 47800
+    -- Connect = Steam (P2P through Steam, friends only) or Tailscale (UDP to the host's IP). Old inis have no
+    -- Connect line and keep working over Tailscale.
+    local steam = (settings.connect or "tailscale"):lower() == "steam"
     local hostAddress = settings.hostaddress or ""
-    if modRole == "client" and (hostAddress == "" or hostAddress == placeholder or not hostAddress:match("^[%w%.%-:]+$")) then
-        log("PhantomPact.ini: Role = Guest but HostAddress isn't set. Put the host's Tailscale IP there and restart the game.")
+    if hostAddress == placeholder then
+        hostAddress = ""
+    end
+    if steam then
+        -- Optional for Steam: the host's Steam name (or SteamID64); empty finds any friend hosting in the game.
+        -- Names go on the command line in quotes, so characters cmd.exe treats specially are refused.
+        if hostAddress:find('[%"%%&|<>^]') then
+            log("PhantomPact.ini: HostAddress has a character that can't be used (\" % & | < > ^). Leave it empty to join any friend who's hosting.")
+            return
+        end
+    elseif modRole == "client" and (hostAddress == "" or not hostAddress:match("^[%w%.%-:]+$")) then
+        log("PhantomPact.ini: Role = Guest but HostAddress isn't set. Put the host's Tailscale IP there (or use Connect = Steam) and restart the game.")
         return
     end
 
@@ -89,8 +102,11 @@ return function(api)
         f:close()
         local args = string.format('-I "%s" %s --dir "%s" --port %d --alive-file "%s"', relay,
             modRole, modDir(), port, alivePath)
-        if modRole == "client" then
-            args = args .. ' --peer ' .. hostAddress
+        if steam then
+            args = args .. ' --transport steam'
+        end
+        if modRole == "client" and hostAddress ~= "" then
+            args = args .. ' --peer "' .. hostAddress .. '"'
         end
         -- pyw/pythonw: Python without a console window. The py launcher comes with python.org installs; plain
         -- pythonw covers the rest. "start" returns at once, so the game doesn't wait.
@@ -101,7 +117,10 @@ return function(api)
             log("Couldn't start the relay: Python 3 wasn't found. Install it from python.org (tick \"Add python to PATH\") and restart the game.")
             return false
         end
-        log("Relay started as " .. role .. (modRole == "client" and (", joining " .. hostAddress) or "") .. " on UDP " .. port .. ".")
+        local joining = modRole ~= "client" and ""
+            or hostAddress ~= "" and (", joining " .. hostAddress)
+            or ", looking for a Steam friend who's hosting"
+        log("Relay started as " .. role .. joining .. (steam and " over Steam." or (" on UDP " .. port .. ".")))
         return true
     end
 

@@ -123,22 +123,110 @@ class EventInbox:
         return self.last_id
 
 
+class UdpLink:
+    """Plain UDP (Tailscale or LAN IPs). Peers are (ip, port) tuples."""
+
+    def __init__(self, role, peer, port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setblocking(False)
+        self.sock.bind(("0.0.0.0", port if role == "host" else 0))
+        # Resolved once (a Tailscale name works too): replies are matched against this exact address.
+        self.peer = (socket.gethostbyname(peer), port) if role != "host" else None
+
+    def send(self, addr, data):
+        self.sock.sendto(data, addr)
+
+    def receive(self):
+        out = []
+        while True:
+            try:
+                data, addr = self.sock.recvfrom(65535)
+            except BlockingIOError:
+                return out
+            except ConnectionResetError:
+                # Windows reports ICMP "port unreachable" this way while the peer isn't running yet.
+                continue
+            out.append((addr, data))
+
+    def wait(self, seconds):
+        """True once a packet is waiting (or False when the time ran out)."""
+        return bool(select.select([self.sock], [], [], seconds)[0])
+
+    def candidates(self):
+        return []
+
+    def describe(self, addr):
+        return f"{addr[0]}:{addr[1]}"
+
+    def describe_self(self):
+        return f"UDP {self.sock.getsockname()[1]}"
+
+
+class SteamLink:
+    """Steam P2P through the game's steam_api64.dll. Peers are SteamID64s; only Steam friends are accepted.
+
+    A guest with no host given finds one by pinging every Steam friend who is in Phantom Blade Zero: only a
+    Phantom Pact host answers, and the first answer pins it.
+    """
+
+    FRIENDS_REFRESH = 5.0
+
+    def __init__(self, role, peer, folder):
+        # Loaded by path: the relay runs with python -I, which leaves its own folder off sys.path.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "steam_transport", os.path.join(os.path.dirname(os.path.abspath(__file__)), "steam_transport.py"))
+        steam_transport = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(steam_transport)
+        dll = steam_transport.find_steam_api(folder)
+        if dll is None:
+            raise SystemExit("Steam mode: steam_api64.dll not found above " + folder)
+        self.st = steam_transport.SteamTransport(dll)
+        self.peer = None
+        self.wanted = None                # a friend name to look for, case-insensitive
+        if role != "host" and peer:
+            if peer.isdigit() and len(peer) == 17:
+                self.peer = int(peer)
+            else:
+                self.wanted = peer.strip().lower()
+        self._friends, self._friends_at = [], -1e9
+
+    def send(self, addr, data):
+        self.st.send(addr, data)
+
+    def receive(self):
+        return self.st.receive()
+
+    def wait(self, seconds):
+        # Steam has no socket to select on: poll every few ms, cheap next to the 50 ms tick.
+        time.sleep(min(seconds, 0.005))
+        return True
+
+    def candidates(self):
+        now = time.monotonic()
+        if now - self._friends_at >= self.FRIENDS_REFRESH:
+            self._friends_at = now
+            self._friends = [fid for fid, name in self.st.friends_in_game()
+                             if self.wanted is None or name.strip().lower() == self.wanted]
+        return self._friends
+
+    def describe(self, addr):
+        return f"{self.st.friend_name(addr) or addr}"
+
+    def describe_self(self):
+        return f"Steam as {self.st.my_name}"
+
+
 class Relay:
-    def __init__(self, role, folder, peer, port):
+    def __init__(self, role, folder, peer, port, link=None):
         self.role = role
         self.out_path = os.path.join(folder, "net_out.txt")
         self.in_path = os.path.join(folder, "net_in.txt")
         self.events_out_path = os.path.join(folder, "net_events_out.txt")
         self.status_path = os.path.join(folder, "net_status.txt")
         self.inbox = EventInbox(os.path.join(folder, "net_events_in.txt"))
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setblocking(False)
-        if role == "host":
-            self.sock.bind(("0.0.0.0", port))
-            self.peer = None              # learned from the first packet
-        else:
-            self.sock.bind(("0.0.0.0", 0))
-            self.peer = (peer, port)
+        self.link = link or UdpLink(role, peer, port)
+        self.peer = self.link.peer        # host: learned from the first packet; Steam guest: maybe found later
         self.last_heard = 0.0
         self.rtt_ms = None
         self.last_ping = 0.0
@@ -148,25 +236,19 @@ class Relay:
         self.events_acked = 0
         self.in_blanked = False           # net_in.txt emptied because the peer went silent
 
-    def send(self, msg):
-        if self.peer is None:
+    def send(self, msg, to=None):
+        to = to if to is not None else self.peer
+        if to is None:
             return
         msg["v"] = PROTOCOL
         try:
-            self.sock.sendto(json.dumps(msg, separators=(",", ":")).encode(), self.peer)
+            self.link.send(to, json.dumps(msg, separators=(",", ":")).encode())
             self.sent += 1
         except OSError:
             pass
 
     def receive_all(self, now):
-        while True:
-            try:
-                data, addr = self.sock.recvfrom(65535)
-            except BlockingIOError:
-                return
-            except ConnectionResetError:
-                # Windows reports ICMP "port unreachable" this way while the peer isn't running yet.
-                continue
+        for addr, data in self.link.receive():
             try:
                 msg = json.loads(data)
             except ValueError:
@@ -178,7 +260,14 @@ class Relay:
                 if self.peer is not None and now - self.last_heard <= PEER_TIMEOUT:
                     continue
                 self.peer = addr
-                print(f"peer connected from {addr[0]}:{addr[1]}", flush=True)
+                print(f"peer connected: {self.link.describe(addr)}", flush=True)
+            elif self.role != "host" and self.peer != addr:
+                # A guest still looking for its host pins the first friend that answers a ping; it never
+                # answers other guests' pings itself.
+                if self.peer is not None or msg.get("t") != "pong":
+                    continue
+                self.peer = addr
+                print(f"found the host: {self.link.describe(addr)}", flush=True)
             self.last_heard = now
             self.received += 1
             kind = msg.get("t")
@@ -208,8 +297,7 @@ class Relay:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
-            ready, _, _ = select.select([self.sock], [], [], remaining)
-            if ready:
+            if self.link.wait(remaining):
                 self.receive_all(time.monotonic())
 
     def tick(self, now):
@@ -220,7 +308,11 @@ class Relay:
                 write_atomic(self.in_path, "")
                 self.in_blanked = True
         if now - self.last_ping >= PING_EVERY:
-            self.send({"t": "ping", "ts": now})
+            if self.peer is None and self.role != "host":
+                for friend in self.link.candidates():
+                    self.send({"t": "ping", "ts": now}, to=friend)
+            else:
+                self.send({"t": "ping", "ts": now})
             self.last_ping = now
         msg = {"t": "state"}
         snapshot = read_text(self.out_path)
@@ -239,10 +331,11 @@ class Relay:
 
     def status(self, now):
         connected = self.peer is not None and now - self.last_heard <= PEER_TIMEOUT
-        peer = f"{self.peer[0]}:{self.peer[1]}" if self.peer else "-"
+        peer = self.link.describe(self.peer).replace(" ", "_") if self.peer else "-"
         rtt = f"{self.rtt_ms:.0f}" if self.rtt_ms is not None else "-"
         # time= (wall clock) lets the mod tell a running relay from a stale status file before starting another.
-        return (f"role={self.role} connected={'yes' if connected else 'no'} peer={peer} "
+        via = "steam" if isinstance(self.link, SteamLink) else "udp"
+        return (f"role={self.role} via={via} connected={'yes' if connected else 'no'} peer={peer} "
                 f"rtt_ms={rtt} sent={self.sent} received={self.received} "
                 f"events_acked={self.events_acked} events_in={self.inbox.last_id} time={int(time.time())}")
 
@@ -412,14 +505,16 @@ def main():
     ap.add_argument("--file", help="record/replay: the recording (JSON lines)")
     ap.add_argument("--client-log", help="replay: write the events the client sends back to this file")
     ap.add_argument("--dir", required=True, help="the PBZCoop mod folder (where cmd.txt lives)")
-    ap.add_argument("--peer", help="host's Tailscale IP (client only)")
+    ap.add_argument("--peer", help="client only: the host's Tailscale IP (udp); with --transport steam, the host's "
+                                   "Steam name or SteamID64, or nothing to find any friend hosting in the game")
+    ap.add_argument("--transport", choices=["udp", "steam"], default="udp")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--seconds", type=float, default=0, help="stop after this long (0 = run until Ctrl+C)")
     ap.add_argument("--alive-file", help="stop once this file (the mod's heartbeat: a unix time) is older than "
                                          "--alive-timeout, i.e. the game was closed")
     ap.add_argument("--alive-timeout", type=float, default=ALIVE_TIMEOUT)
     args = ap.parse_args()
-    if args.role == "client" and not args.peer:
+    if args.role == "client" and args.transport == "udp" and not args.peer:
         ap.error("client needs --peer <host IP>")
     os.makedirs(args.dir, exist_ok=True)
     if args.role == "echo":
@@ -434,8 +529,9 @@ def main():
             run_replay(args.dir, args.file, args.seconds, args.client_log)
         return
 
-    relay = Relay(args.role, args.dir, args.peer, args.port)
-    print(f"PBZCoop relay {args.role} on UDP {args.port}, files in {args.dir}", flush=True)
+    link = SteamLink(args.role, args.peer, args.dir) if args.transport == "steam" else None
+    relay = Relay(args.role, args.dir, args.peer, args.port, link)
+    print(f"PBZCoop relay {args.role} on {relay.link.describe_self()}, files in {args.dir}", flush=True)
     start = time.monotonic()
     last_status = 0.0
     try:
