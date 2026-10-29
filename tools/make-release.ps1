@@ -27,3 +27,19 @@ $zip = "$stage.zip"
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
 Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName.Substring($stage.Length + 1) }
 "Built $zip ($([math]::Round((Get-Item $zip).Length / 1KB)) KB)"
+
+# The checks Nexus runs on upload, done first: file types it quarantines on sight, then an antivirus scan
+# (Windows Defender; Nexus also uses VirusTotal, which this can't replace). Read-only: nothing is removed.
+$quarantined = '.exe', '.dll', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.jar', '.msi', '.scr', '.com', '.zip', '.rar', '.7z'
+$risky = Get-ChildItem $stage -Recurse -File | Where-Object { $quarantined -contains $_.Extension.ToLower() }
+if ($risky) { throw "Nexus would quarantine this zip: $(($risky | ForEach-Object Name) -join ', ')" }
+"File types OK for Nexus: $((Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.Extension.ToLower() } | Sort-Object -Unique) -join ' ')"
+$defender = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+if (Test-Path $defender) {
+    $scan = & $defender -Scan -ScanType 3 -File $zip -DisableRemediation 2>&1 | Out-String
+    if ($scan -notmatch 'found no threats') { throw "Windows Defender flagged the zip:`n$scan" }
+    "Windows Defender: no threats."
+} else {
+    Write-Warning "Windows Defender not found; scan the zip before uploading."
+}
+"SHA-256 (look it up on virustotal.com): $((Get-FileHash $zip -Algorithm SHA256).Hash)"
