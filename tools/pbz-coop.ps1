@@ -30,11 +30,16 @@ param(
     [string]$File,
     [int]$Port = 47800,
     [switch]$Stop,
-    [string]$GameWin64 = 'D:\SteamLibrary\steamapps\common\PBZ\platform\steam',
+    [string]$GameWin64,    # found through Steam when left out
     [int]$GameplayTimeoutSec = 600
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'find-game.ps1')
+if (-not $GameWin64) {
+    $GameWin64 = Find-PbzGame
+    if (-not $GameWin64) { throw "Phantom Blade Zero wasn't found in your Steam libraries. Run again with -GameWin64 '<Steam library>\steamapps\common\PBZ\platform\steam'." }
+}
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $statePath = Join-Path $projectRoot 'logs\coop-last.json'
 $modDir = Join-Path $GameWin64 'ue4ss\Mods\PBZCoop'
@@ -128,5 +133,5 @@ for ($try = 1; $try -le 3 -and -not $syncOn; $try++) {
 }
 $lines
 if (-not $syncOn) { throw "The mod never turned sync on (no 'Online sync on' in the UE4SS log). Is PBZCoop loaded? Check ue4ss\UE4SS.log." }
-if ($Role -eq 'host') { Write-Output "Hosting on UDP $Port. Your friend runs: .\tools\pbz-coop.ps1 -Role client -Peer <your Tailscale IP>" }
+if ($Role -eq 'host') { Write-Output "Hosting on UDP $Port. Your friend opens '3 - Join friend.bat' and enters your Tailscale IP." }
 Write-Output "Link status: $modDir\net_status.txt (or send the mod command 'netstatus')."

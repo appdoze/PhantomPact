@@ -19,7 +19,10 @@ Copy-Item (Join-Path $root 'INSTALL.md') $stage
 Copy-Item (Join-Path $root 'mod\PBZCoop\enabled.txt') (Join-Path $stage 'mod\PBZCoop')
 Copy-Item (Join-Path $root 'mod\PBZCoop\Scripts\*.lua') (Join-Path $stage 'mod\PBZCoop\Scripts')
 Copy-Item (Join-Path $root 'net\pbzcoop_net.py') (Join-Path $stage 'net')
-foreach ($t in 'install-mod.ps1', 'pbz-coop.ps1', 'game-driver.ps1', 'pbz-selftest.ps1') { Copy-Item (Join-Path $PSScriptRoot $t) (Join-Path $stage 'tools') }
+foreach ($t in 'install-mod.ps1', 'pbz-coop.ps1', 'game-driver.ps1', 'find-game.ps1', 'pbz-selftest.ps1') { Copy-Item (Join-Path $PSScriptRoot $t) (Join-Path $stage 'tools') }
+# Double-click launchers at the top of the zip: they run the scripts with -ExecutionPolicy Bypass, since Windows
+# blocks .ps1 files by default.
+Copy-Item (Join-Path $root 'release\*.bat') $stage
 
 $zip = "$stage.zip"
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip

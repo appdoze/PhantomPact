@@ -20,25 +20,24 @@ Fan-made, unofficial. Each player needs their own copy of PBZ on Steam. No game 
 4. **Tailscale** (tailscale.com), both signed in to the same tailnet; or any network where the friend can reach
    the host's UDP port 47800.
 
-## Install PBZCoop (both players)
+## Install Phantom Pact (both players)
 
-Unzip this package anywhere, open PowerShell in that folder and run:
-
-    .\tools\install-mod.ps1 -GameWin64 'D:\SteamLibrary\steamapps\common\PBZ\platform\steam'
-
-(use your own Steam library path). It copies the mod into `ue4ss\Mods\PBZCoop` and enables it in `mods.txt`.
-Start the game: the UE4SS console should show `[PBZCoop] Loaded (instance 1, v1.0.0, ...)`.
+1. Unzip this package anywhere (for example your Desktop).
+2. Double-click **`1 - Install Phantom Pact.bat`**. It finds the game through Steam, copies the mod into
+   `ue4ss\Mods\PBZCoop` and turns it on in `mods.txt`.
+3. Start the game. The UE4SS console shows `[PBZCoop] Loaded (instance 1, v1.0.0, ...)`.
 
 ## Play
 
-1. Both: start PBZ and load your save. Be on the same map, near each other.
-2. Host: `.\tools\pbz-coop.ps1 -Role host`
-3. Friend: `.\tools\pbz-coop.ps1 -Role client -Peer <host's Tailscale IP>`
-   (the host's IP is shown in the Tailscale app, it starts with 100.)
-4. Stop: `.\tools\pbz-coop.ps1 -Stop` (on both PCs).
+1. Both: start the game and load your save. Be on the same map, near each other.
+2. Host: double-click **`2 - Host.bat`**.
+3. Friend: double-click **`3 - Join friend.bat`** and type the host's Tailscale IP (shown in the host's
+   Tailscale app, it starts with 100.).
+4. To stop: **`Stop co-op.bat`** on both PCs.
 
-Add `-GameWin64 '<your path>\PBZ\platform\steam'` to these commands if your library isn't
-`D:\SteamLibrary`.
+If the game isn't found (an unusual Steam setup), run the scripts from PowerShell with
+`-GameWin64 '<Steam library>\steamapps\common\PBZ\platform\steam'`, e.g.
+`powershell -ExecutionPolicy Bypass -File .\tools\install-mod.ps1 -GameWin64 '...'`.
 
 ## What's shared
 

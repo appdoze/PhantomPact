@@ -3,17 +3,23 @@
     Copies the PBZCoop mod into a game's UE4SS Mods folder.
 
 .PARAMETER GameWin64
-    The game's Binaries\Win64 folder (where the *-Win64-Shipping.exe and UE4SS's dwmapi.dll live).
+    The folder of the real game exe, where UE4SS's dwmapi.dll lives (for PBZ: ...\PBZ\platform\steam).
+    Found through Steam when left out.
 
 .EXAMPLE
-    .\tools\install-mod.ps1 -GameWin64 "C:\Program Files (x86)\Steam\steamapps\common\BlackMythWukong\b1\Binaries\Win64"
+    .\tools\install-mod.ps1
+    .\tools\install-mod.ps1 -GameWin64 'D:\SteamLibrary\steamapps\common\PBZ\platform\steam'
 #>
 param(
-    [Parameter(Mandatory = $true)]
     [string]$GameWin64
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'find-game.ps1')
+if (-not $GameWin64) {
+    $GameWin64 = Find-PbzGame
+    if (-not $GameWin64) { throw "Phantom Blade Zero wasn't found in your Steam libraries. Run again with -GameWin64 '<Steam library>\steamapps\common\PBZ\platform\steam'." }
+}
 
 if (-not (Test-Path $GameWin64)) {
     throw "Folder not found: $GameWin64"
@@ -26,7 +32,7 @@ $modsDir = @('ue4ss\Mods', 'Mods') |
     Select-Object -First 1
 
 if (-not $modsDir) {
-    throw "No UE4SS Mods folder in $GameWin64. Install UE4SS first (docs\UE4SS_SETUP.md)."
+    throw "No UE4SS Mods folder in $GameWin64. Install UE4SS for Phantom Blade Zero (Nexus Mods) there first."
 }
 
 $source = Join-Path $PSScriptRoot '..\mod\PBZCoop'
