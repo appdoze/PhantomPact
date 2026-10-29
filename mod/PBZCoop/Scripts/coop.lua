@@ -60,6 +60,7 @@ return function(api)
         remoteEnemies = {},       -- client: name -> latest host record
         deadSent = {},            -- host: enemy name -> true once its death was announced
         pendingDeaths = {},       -- client: host id -> true for a death announced while our copy wasn't loaded
+        pendingBosses = {},       -- client: host id -> true for a boss fight announced before our copy was matched
         matchSticky = {},         -- client: host id -> address of the local actor matched to it by class/position
         foggedBosses = {},        -- boss id -> boss actor while we keep its arena's fog walls closed for the other player
         stats = { sent = 0, received = 0, applied = 0 },
@@ -463,6 +464,18 @@ return function(api)
     -- natively, so a UE4SS hook never sees it) and reported to the host. Syncing only ever LOWERS health and
     -- posture: the host's numbers are a round trip old and don't include the client's newest hits yet.
     local seen = {}           -- client: name -> { hp, posture, addr } as left by the previous tick
+
+    -- The other player's boss fight, mirrored on our copy of that boss: boss bar and closed fog walls.
+    local function mirrorBossFight(name, actor)
+        if game.showBossBar then
+            game.showBossBar(actor)
+        end
+        if game.setBossFog then
+            net.foggedBosses[name] = actor
+            game.setBossFog(actor, true)
+        end
+    end
+
     local function applyRemoteEnemies(origin)
         if game.refreshEnemyIds then
             game.refreshEnemyIds()
@@ -479,6 +492,12 @@ return function(api)
                     log("Host said " .. name .. " died earlier; killed it here now that it's loaded.")
                 end
             elseif not (game.isDead and game.isDead(actor)) then
+                if net.pendingBosses[name] then
+                    -- The host's boss fight started before our copy of the boss was matched: mirror it now.
+                    net.pendingBosses[name] = nil
+                    log("Host's boss fight with " .. name .. " now matched here.")
+                    mirrorBossFight(name, actor)
+                end
                 local hp = game.getHealth and game.getHealth(actor)
                 local posture = game.getPosture and game.getPosture(actor)
                 local prev = seen[name]
@@ -526,7 +545,9 @@ return function(api)
             else
                 -- Not loaded (or not matched) here right now: kill it when it shows up (applyRemoteEnemies).
                 net.pendingDeaths[name] = true
+                log("Host says " .. name .. " died; not matched here yet, will kill it when it is.")
             end
+            net.pendingBosses[name] = nil
         end
         -- A boss whose fight we mirrored is dead: lift the fog walls we closed for it.
         local fogActor = valid(actor) and actor or net.foggedBosses[name]
@@ -580,6 +601,7 @@ return function(api)
     local function forgetDeaths()
         net.deadSent = {}
         net.pendingDeaths = {}
+        net.pendingBosses = {}
         if game.resetBosses then
             game.resetBosses()
         end
@@ -606,12 +628,12 @@ return function(api)
     handlers.B = function(name)
         log("The other player started a boss fight with " .. name .. ".")
         local actor = enemyByName[name]
-        if valid(actor) and game.showBossBar then
-            game.showBossBar(actor)
-        end
-        if valid(actor) and game.setBossFog then
-            net.foggedBosses[name] = actor
-            game.setBossFog(actor, true)
+        if valid(actor) then
+            mirrorBossFight(name, actor)
+        elseif isClient() then
+            -- Not matched here yet (still loading, or too far from the host's copy): mirror it once it is.
+            net.pendingBosses[name] = true
+            log("Boss " .. name .. " isn't matched here yet; will show its fight when it is.")
         end
     end
 
@@ -740,6 +762,7 @@ return function(api)
         net.lastRemoteSeq = nil
         net.matchSticky = {}
         net.pendingDeaths = {}
+        net.pendingBosses = {}
         enemyByName = {}
         seen = {}
     end

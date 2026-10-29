@@ -77,6 +77,8 @@ Check 'client hits land in host world' ($applied -gt 0 -and $after -lt $before) 
 
 # Bosses: same boss in both worlds; the host's fight shows the boss bar on the client.
 Run 1 'eval for _,e in ipairs(PBZ.game.listEnemies()) do PBZ.game.applyDamage(e,99999,0) end' 2 | Out-Null
+# The client turned and moved while attacking: line both players up again so the two bosses spawn at one spot.
+Run 1 $setup | Out-Null; Run 2 $setup | Out-Null
 Run 1 'spawnenemy BP_Monster_ZuoShang_Young_Tutorial 600' | Out-Null; Run 2 'spawnenemy BP_Monster_ZuoShang_Young_Tutorial 600' 3 | Out-Null
 Use 2; $t0 = Get-Date; Run 1 'bossbar' 4 | Out-Null
 $clientLog = Get-ModLog -Since $t0 | Where-Object { $_ -match '\[PBZCoop#2\] ' }
@@ -86,7 +88,7 @@ Check 'boss fight shows boss bar on client' (($clientLog -join ' ') -match 'Show
 Use 2; $t0 = Get-Date
 Run 1 'eval for _,e in ipairs(PBZ.game.listEnemies()) do PBZ.game.applyDamage(e,99999,0) end' 4 | Out-Null
 $clientLog = Get-ModLog -Since $t0 | Where-Object { $_ -match '\[PBZCoop#2\] ' }
-Check 'host kill reaches client' (($clientLog -join ' ') -match 'Host says .* died') ''
+Check 'host kill reaches client' (($clientLog -join ' ') -match 'Host says? .* died.*killed it here') ''
 
 # Bell rest, dust, loot: host side actions, client must follow.
 $inv = 'eval local _,p=PBZ.getPlayer1() local bp=StaticFindObject("/Script/Engine.Default__SubsystemBlueprintLibrary"):GetWorldSubsystem(p, StaticFindObject("/Script/ProjectPBZ.PBZBackPackSubsystem")) return string.format("INV dust=%d material=%d", p.ConsciousnessDust, PBZ.game.itemCount(bp, "Weapon_Material_01"))'

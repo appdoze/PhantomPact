@@ -3,7 +3,7 @@
 --
 -- F6  print info about player 1's character
 -- F7  list characters near player 1 (finds enemy classes)
--- F8  spawn player 2: a second local player + a copy of player 1's character
+-- F8  spawn player 2: a second local player + a copy of player 1's character (F8-F11 need PBZCOOP_DEBUG=1)
 -- F9  remove player 2
 
 local VERSION = "1.0.0"
@@ -347,10 +347,14 @@ end
 
 RegisterKeyBind(Key.F6, onGameThread(dumpPlayer, "F6"))
 RegisterKeyBind(Key.F7, onGameThread(listNearby, "F7"))
-RegisterKeyBind(Key.F8, onGameThread(spawnPlayer2Clone, "F8"))
-RegisterKeyBind(Key.F9, onGameThread(removePlayer2, "F9"))
-RegisterKeyBind(Key.F10, onGameThread(createPlayer2Only, "F10"))
-RegisterKeyBind(Key.F11, onGameThread(spawnPlayer2DefaultPawn, "F11"))
+-- F8-F11 spawn test pawns into the world: developer builds only (PBZCOOP_DEBUG=1), so a player can't hit one by accident.
+local DEV_KEYS = os.getenv("PBZCOOP_DEBUG") == "1"
+if DEV_KEYS then
+    RegisterKeyBind(Key.F8, onGameThread(spawnPlayer2Clone, "F8"))
+    RegisterKeyBind(Key.F9, onGameThread(removePlayer2, "F9"))
+    RegisterKeyBind(Key.F10, onGameThread(createPlayer2Only, "F10"))
+    RegisterKeyBind(Key.F11, onGameThread(spawnPlayer2DefaultPawn, "F11"))
+end
 
 -- Where are player 1 and player 2 right now?
 local function where()
@@ -529,4 +533,4 @@ LoopAsync(500, function()
     return false
 end)
 
-log("Loaded (instance " .. INSTANCE .. ", v" .. VERSION .. ", files in " .. modDir() .. "). F6 info | F7 nearby | F8 P2 clone | F9 remove P2 | F10 P2 controller only | F11 P2 plain pawn | cmd.txt enabled")
+log("Loaded (instance " .. INSTANCE .. ", v" .. VERSION .. ", files in " .. modDir() .. "). F6 info | F7 nearby" .. (DEV_KEYS and " | F8 P2 clone | F9 remove P2 | F10 P2 controller only | F11 P2 plain pawn" or "") .. " | cmd.txt enabled")

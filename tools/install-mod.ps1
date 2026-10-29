@@ -56,4 +56,4 @@ if (Test-Path $modsTxt) {
 }
 
 Write-Output "Installed PBZCoop to $target"
-Write-Output "Restart the game, load into gameplay, then press F6 to test."
+Write-Output "Start the game: the UE4SS console should show '[PBZCoop] Loaded (instance 1, ...)'. Then see INSTALL.md, 'Play'."
