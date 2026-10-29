@@ -167,6 +167,12 @@ boss from its spawner and the bot engaged it as `sp:ZuoShangyoung_Seq003`, takin
 - World subsystems aren't found by `FindFirstOf`; use `SubsystemBlueprintLibrary:GetWorldSubsystem`.
   `PBZSpawnSubsystem` doesn't exist on the prologue map; enemies are spawned by class from the codex table.
 - `DataTable:FindRow` / `ForEachRow` work in this UE4SS; codex rows give each enemy's class and boss flag.
+- Killing an enemy type the save hasn't met yet (a new codex entry) autosaves the game. Tests only kill the thug
+  and the tutorial boss, which the test save already knows; `coop-scenarios.ps1` checks the save's hash. Removing
+  `W_PlayerDead` and a real death respawn (`Save Game on Respawn`) autosave too.
+- In the prologue, kills pay no dust and drop nothing, whatever the enemy (bandit, scavenger and GuiChai checked):
+  loot there comes from scripted encounters. The prologue also never starts a respawn: a real death shows no
+  death widget, and the player stays down.
 
 ## PvP (`pvp.lua`, `PvP = On`)
 

@@ -24,6 +24,9 @@ if (@($ready | Where-Object { $_ -match 'gameplay: True' }).Count -ne 2) {
 }
 Start-Sleep 3
 $t0 = Get-Date
+# The game autosaves on some events (a new codex entry, a respawn). Nothing here may change the save.
+$savePath = 'D:\SteamLibrary\steamapps\common\PBZ\ProjectPBZ\Saved\SaveGames\Steam\76561198310534467\PBZSaveGame.sav'
+$saveHash = (Get-FileHash $savePath).Hash
 
 $defs = "eval PBZT={} function PBZT.near(a) local best,bd for _,e in ipairs(PBZ.game.listEnemies()) do if not PBZ.game.isDead(e) then local d=PBZ.distance(a,e:K2_GetActorLocation()) if not bd or d<bd then best,bd=e,d end end end return best end function PBZT.atk() local _,p=PBZ.getPlayer1() local asc=StaticFindObject('/Script/GameplayAbilities.Default__AbilitySystemBlueprintLibrary'):GetAbilitySystemComponent(p) local c asc.ActivatableAbilities.Items:ForEach(function(_,x) local ab=x:get().Ability if ab and ab:IsValid() and ab:GetClass():GetFName():ToString()=='GA_Hun_Young_A_C' then c=ab:GetClass() end end) return c end function PBZT.front(actor,e,cm) local gl=actor:K2_GetActorLocation() local r=actor:K2_GetActorRotation().Yaw e:K2_SetActorLocation({X=gl.X+math.cos(math.rad(r))*cm,Y=gl.Y+math.sin(math.rad(r))*cm,Z=gl.Z+5},false,{},true) e:K2_SetActorRotation({Pitch=0,Yaw=r+180,Roll=0},false) return r end function PBZT.swing() local _,p=PBZ.getPlayer1() local asc=StaticFindObject('/Script/GameplayAbilities.Default__AbilitySystemBlueprintLibrary'):GetAbilitySystemComponent(p) return asc:TryActivateAbilityByClass(PBZT.atk(),true) end function PBZT.st() local s=PBZ.net.stats local hp,po=-1,-1 if PBZT.e and PBZT.e:IsValid() then hp,po=PBZ.game.getHealth(PBZT.e),PBZ.game.getPosture(PBZT.e) or -1 end return string.format('hp=%.1f posture=%.1f reported=%d applied=%d undone=%d dead=%s', hp or -1, po, s.hitsReported or 0, s.hitsApplied or 0, s.undone or 0, tostring(PBZT.e and PBZT.e:IsValid() and PBZ.game.isDead(PBZT.e))) end return 'defs'"
 Q 1 $defs | Out-Null; Q 2 $defs | Out-Null
@@ -171,6 +174,7 @@ if ($gone.Count) { Write-Output "NOTE  game copy PID $($gone -join ',') exited d
 
 $errors = @(Get-ModLog -Since $t0 -Last 8000 | Where-Object { $_ -match 'net error|event \w+ error|\.lua:\d+' })
 Check 'no mod errors' (-not $errors) (($errors | Select-Object -First 2) -join ' | ')
+Check 'save untouched' ((Get-FileHash $savePath).Hash -eq $saveHash) "restore from the newest D:\PBZSaveBackup\selftest-* if not"
 & "$p\..\pbz-selftest.ps1" -Stop | Out-Null
 $failed = @($results.GetEnumerator() | Where-Object { -not $_.Value }).Count
 Write-Output ("`n{0} of {1} checks passed" -f ($results.Count - $failed), $results.Count)
