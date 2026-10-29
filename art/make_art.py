@@ -9,11 +9,8 @@ import sys
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_SRC = os.path.join(
-    os.environ.get("LOCALAPPDATA", ""), "Temp", "claude",
-    "C--Users-TheCo-Downloads-Coop-Mode---Onimusha-Way-of-the-Sword",
-    "b4c3cbaa-e026-4a6f-a134-4622b5466edb", "images", "1.webp")
-SRC = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SRC
+# The Phantom Blade Zero key art to build on: python art/make_art.py <key-art image>
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "key-art.webp")
 
 FONTS = r"C:\Windows\Fonts"
 BOLD = os.path.join(FONTS, "georgiab.ttf")
