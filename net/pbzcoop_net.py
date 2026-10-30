@@ -7,9 +7,14 @@ The game mod and this relay talk through small text files in the mod folder:
   net_events_in.txt   written by the relay: the remote side's events, in order, same format
   net_status.txt      written by the relay: connection state, peer address, round-trip time
 
-Snapshots are newest-wins: a lost packet is simply replaced by the next one 50 ms later.
+Snapshots are newest-wins: a new one is sent as soon as the mod writes it (the files are checked every 5 ms) and
+the newest is resent every 50 ms, so a lost packet is replaced shortly after.
 Events (attacks, kills, pickups) are reliable: resent every tick until the peer acknowledges them.
 The relay doesn't interpret either; only echo mode shifts the "P" line so the fake friend stands aside.
+
+Security: only Tailscale addresses (and this PC) are accepted by default (--allow any to change that), the client
+only accepts its host's address, and with "Secret = ..." in PhantomPact.ini (same on both PCs) every packet is
+signed with HMAC-SHA256 and replays are dropped.
 
 Usage:
   host:   python -I pbzcoop_net.py host   --dir <mod folder>
@@ -25,19 +30,125 @@ Usage:
 import collections
 
 import argparse
+import hashlib
+import hmac
+import ipaddress
 import json
 import os
+import secrets
 import select
 import socket
 import time
 
 PORT = 47800
-TICK = 0.05          # 20 sends per second
+TICK = 0.05          # resend interval: the newest snapshot goes out at least this often, so a lost packet heals
+WATCH = 0.005        # how often the mod's files are checked; anything new is sent at once instead of on the tick
 PING_EVERY = 1.0
 PEER_TIMEOUT = 3.0
 PROTOCOL = 2
 MAX_EVENTS_PER_PACKET = 40
 MAX_SNAPSHOT_BYTES = 48000
+
+# Who may talk to this relay. "tailscale": Tailscale addresses (100.64.0.0/10) and this PC only, so the open UDP
+# port can't be used from the LAN or the internet even if a firewall lets packets through. "any": no filter (for
+# other VPNs or a LAN game; set a Secret then).
+ALLOWED_NETWORKS = {
+    "tailscale": [ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("127.0.0.0/8")],
+    "any": None,
+}
+MAC_BYTES = 16       # HMAC-SHA256 truncated to 128 bits
+REPLAY_SESSIONS = 8  # peer relay sessions whose packet counters are remembered
+
+
+def fine_timer():
+    """Windows wakes sleeping threads on a 15.6 ms clock by default, which made the 5 ms file check (and select's
+    timeout) effectively 15.6 ms. Ask for 1 ms, as games do; it is released when the process exits."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.WinDLL("winmm").timeBeginPeriod(1)
+        except (OSError, AttributeError):
+            pass
+
+
+def read_secret(folder, path=None):
+    """The shared secret: --secret-file, else "Secret = ..." in PhantomPact.ini next to the mod. Empty = off."""
+    if path:
+        return read_text(path).strip()
+    ini = os.path.join(folder, "PhantomPact.ini")
+    if not os.path.exists(ini):
+        # Extra test instances run in <mod>/inst<n>/; the ini lives in the mod folder above.
+        ini = os.path.join(os.path.dirname(os.path.normpath(folder)), "PhantomPact.ini")
+    for line in read_text(ini).splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip().lower() == "secret":
+            value = value.split(";", 1)[0].strip()
+            if value and not value.upper().startswith("PUT-"):
+                return value
+    return ""
+
+
+class Auth:
+    """Optional packet authentication with a secret both players share.
+
+    Every packet carries the sender's random session id and a counter and is signed with HMAC-SHA256; packets with
+    a bad signature, from another protocol, or replayed (counter not above the last one seen for that session) are
+    dropped. Without a secret packets are unsigned (and only the address filter applies)."""
+
+    def __init__(self, secret):
+        self.key = hashlib.sha256(secret.encode()).digest() if secret else None
+        self.sid = secrets.token_hex(8)
+        self.counter = 0
+        self.seen = collections.OrderedDict()   # peer session id -> highest counter accepted
+        self.rejected = 0
+
+    def seal(self, msg):
+        if self.key is None:
+            return json.dumps(msg, separators=(",", ":")).encode()
+        self.counter += 1
+        msg["a"] = self.sid
+        msg["n"] = self.counter
+        body = json.dumps(msg, separators=(",", ":")).encode()
+        return body + b"\n" + hmac.new(self.key, body, hashlib.sha256).digest()[:MAC_BYTES].hex().encode()
+
+    def open(self, data):
+        """The message dict, or None if the packet must be dropped."""
+        if self.key is None:
+            body = data
+        else:
+            body, sep, mac = data.rpartition(b"\n")
+            want = hmac.new(self.key, body, hashlib.sha256).digest()[:MAC_BYTES].hex().encode()
+            if not sep or not hmac.compare_digest(mac, want):
+                self.rejected += 1
+                return None
+        try:
+            msg = json.loads(body)
+        except ValueError:
+            self.rejected += 1
+            return None
+        if not isinstance(msg, dict):
+            self.rejected += 1
+            return None
+        if self.key is not None:
+            sid, n = msg.get("a"), msg.get("n")
+            if not isinstance(sid, str) or not isinstance(n, int) or n <= self.seen.get(sid, 0):
+                self.rejected += 1
+                return None
+            self.seen[sid] = n
+            self.seen.move_to_end(sid)
+            while len(self.seen) > REPLAY_SESSIONS:
+                self.seen.popitem(last=False)
+        return msg
+
+
+def address_allowed(addr, networks):
+    if networks is None:
+        return True
+    try:
+        ip = ipaddress.ip_address(addr[0])
+    except ValueError:
+        return False
+    return any(ip in net for net in networks)
 
 
 def read_text(path):
@@ -124,8 +235,11 @@ class EventInbox:
 
 
 class Relay:
-    def __init__(self, role, folder, peer, port):
+    def __init__(self, role, folder, peer, port, secret="", allow="tailscale"):
         self.role = role
+        self.auth = Auth(secret)
+        self.allowed = ALLOWED_NETWORKS[allow]
+        self.filtered = 0                 # packets dropped because of their sender address
         self.out_path = os.path.join(folder, "net_out.txt")
         self.in_path = os.path.join(folder, "net_in.txt")
         self.events_out_path = os.path.join(folder, "net_events_out.txt")
@@ -138,8 +252,11 @@ class Relay:
             self.peer = None              # learned from the first packet
         else:
             self.sock.bind(("0.0.0.0", 0))
-            self.peer = (peer, port)
+            # Resolved once: replies are only accepted from exactly this address and port.
+            self.peer = (socket.gethostbyname(peer), port)
         self.last_heard = 0.0
+        self.last_out_sig = None          # (mtime, size) of net_out.txt / net_events_out.txt when last sent
+        self.last_sent_at = 0.0
         self.rtt_ms = None
         self.last_ping = 0.0
         self.received = 0
@@ -153,7 +270,7 @@ class Relay:
             return
         msg["v"] = PROTOCOL
         try:
-            self.sock.sendto(json.dumps(msg, separators=(",", ":")).encode(), self.peer)
+            self.sock.sendto(self.auth.seal(msg), self.peer)
             self.sent += 1
         except OSError:
             pass
@@ -167,11 +284,12 @@ class Relay:
             except ConnectionResetError:
                 # Windows reports ICMP "port unreachable" this way while the peer isn't running yet.
                 continue
-            try:
-                msg = json.loads(data)
-            except ValueError:
+            # The client only listens to the host it was given; the host only to allowed networks.
+            if (self.role != "host" and addr != self.peer) or not address_allowed(addr, self.allowed):
+                self.filtered += 1
                 continue
-            if not isinstance(msg, dict) or msg.get("v") != PROTOCOL:
+            msg = self.auth.open(data)
+            if msg is None or msg.get("v") != PROTOCOL:
                 continue
             if self.role == "host" and self.peer != addr:
                 # Pinned to the first peer: another sender is only taken once the current one went silent.
@@ -201,16 +319,30 @@ class Relay:
                 # only then do we resend the events it lost.
                 self.acked[msg["sid"]] = msg["id"]
 
+    def out_signature(self):
+        sig = []
+        for path in (self.out_path, self.events_out_path):
+            try:
+                st = os.stat(path)
+                sig.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                sig.append(None)
+        return tuple(sig)
+
     def wait(self, seconds):
-        """Sleep until the next tick, but handle incoming packets the moment they arrive."""
+        """Sleep until the next tick, but handle incoming packets the moment they arrive and send what the mod
+        wrote the moment it appears (instead of up to one tick later)."""
         deadline = time.monotonic() + seconds
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
-            ready, _, _ = select.select([self.sock], [], [], remaining)
+            ready, _, _ = select.select([self.sock], [], [], min(remaining, WATCH))
+            now = time.monotonic()
             if ready:
-                self.receive_all(time.monotonic())
+                self.receive_all(now)
+            if self.out_signature() != self.last_out_sig:
+                self.send_state(now)
 
     def tick(self, now):
         self.receive_all(now)
@@ -222,6 +354,12 @@ class Relay:
         if now - self.last_ping >= PING_EVERY:
             self.send({"t": "ping", "ts": now})
             self.last_ping = now
+        if now - self.last_sent_at >= TICK * 0.9:
+            self.send_state(now)
+
+    def send_state(self, now):
+        self.last_out_sig = self.out_signature()
+        self.last_sent_at = now
         msg = {"t": "state"}
         snapshot = read_text(self.out_path)
         if snapshot.strip():
@@ -244,7 +382,9 @@ class Relay:
         # time= (wall clock) lets the mod tell a running relay from a stale status file before starting another.
         return (f"role={self.role} connected={'yes' if connected else 'no'} peer={peer} "
                 f"rtt_ms={rtt} sent={self.sent} received={self.received} "
-                f"events_acked={self.events_acked} events_in={self.inbox.last_id} time={int(time.time())}")
+                f"events_acked={self.events_acked} events_in={self.inbox.last_id} "
+                f"auth={'on' if self.auth.key else 'off'} rejected={self.auth.rejected} filtered={self.filtered} "
+                f"time={int(time.time())}")
 
 
 ECHO_OFFSET_X = 300.0   # cm
@@ -418,6 +558,9 @@ def main():
     ap.add_argument("--alive-file", help="stop once this file (the mod's heartbeat: a unix time) is older than "
                                          "--alive-timeout, i.e. the game was closed")
     ap.add_argument("--alive-timeout", type=float, default=ALIVE_TIMEOUT)
+    ap.add_argument("--allow", choices=sorted(ALLOWED_NETWORKS), default="tailscale",
+                    help="who may connect: tailscale (100.64.0.0/10 and this PC, default) or any")
+    ap.add_argument("--secret-file", help="file holding the shared secret (default: Secret in <dir>/PhantomPact.ini)")
     args = ap.parse_args()
     if args.role == "client" and not args.peer:
         ap.error("client needs --peer <host IP>")
@@ -434,8 +577,11 @@ def main():
             run_replay(args.dir, args.file, args.seconds, args.client_log)
         return
 
-    relay = Relay(args.role, args.dir, args.peer, args.port)
-    print(f"PBZCoop relay {args.role} on UDP {args.port}, files in {args.dir}", flush=True)
+    fine_timer()
+    secret = read_secret(args.dir, args.secret_file)
+    relay = Relay(args.role, args.dir, args.peer, args.port, secret=secret, allow=args.allow)
+    print(f"PBZCoop relay {args.role} on UDP {args.port}, files in {args.dir}, "
+          f"auth {'on' if secret else 'off (set Secret in PhantomPact.ini)'}, allow {args.allow}", flush=True)
     start = time.monotonic()
     last_status = 0.0
     try:

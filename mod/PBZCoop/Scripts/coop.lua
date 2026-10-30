@@ -24,7 +24,7 @@ return function(api)
     local modDir, spawnBesidePlayer1, game = api.modDir, api.spawnBesidePlayer1, api.game
 
     local GHOST_CLASS = "/Script/Engine.DefaultPawn"
-    local NET_SEND_MS = 50        -- matches the relay's tick
+    local NET_SEND_MS = 33        -- snapshot writes (~30/s); the relay sends each one as soon as it appears
     local TICK_MS = 16            -- one game-thread tick: steer the ghost; every NET_EVERY ticks exchange state
     local GHOST_SNAP_CM = 600     -- walking ghost further than this from its target teleports instead
     local GHOST_STOP_CM = 60      -- walking ghost closer than this stops and faces the remote player's direction
@@ -107,7 +107,7 @@ return function(api)
         if not os.rename(tmp, path) then
             os.remove(path)
             if not os.rename(tmp, path) then
-                os.remove(tmp)    -- the relay had the file open; the next snapshot comes 50 ms later
+                os.remove(tmp)    -- the relay had the file open; the next snapshot comes ~33 ms later
             end
         end
     end
@@ -115,11 +115,17 @@ return function(api)
     -- tonumber that also turns NaN into nil (a NaN position would teleport actors into nowhere).
     local function num(s)
         local n = tonumber(s)
-        if n ~= n then
+        -- NaN and infinities (e.g. "1e999") from the network are dropped, never applied.
+        if n ~= n or n == math.huge or n == -math.huge then
             return nil
         end
         return n
     end
+
+    -- Amounts the other side may ask for in one event. Far above anything the game produces (a boss drops tens
+    -- of thousands of Dust, a hit deals thousands), but a malformed or forged event can't hand out billions.
+    local MAX_EVENT_DUST = 1000000
+    local MAX_EVENT_DAMAGE = 1000000
 
     ------------------------------------------------------------------ events
 
@@ -559,11 +565,15 @@ return function(api)
 
     handlers.D = function(rest)
         local name, amount, posture = rest:match("^(%S+) (%S+)%s*(%S*)")
-        amount = tonumber(amount)
-        if isHost() and name and amount then
+        amount = num(amount)
+        posture = num(posture)
+        if posture ~= nil then
+            posture = math.max(0, math.min(posture, MAX_EVENT_DAMAGE))
+        end
+        if isHost() and name and amount and amount >= 0 and amount <= MAX_EVENT_DAMAGE then
             local actor = enemyByName[name]
             if valid(actor) and game.applyDamage then
-                game.applyDamage(actor, amount, tonumber(posture) or 0)
+                game.applyDamage(actor, amount, posture or 0)
                 net.stats.hitsApplied = (net.stats.hitsApplied or 0) + 1
                 if seen[name] then
                     -- In "loop" mode the client half watches this same enemy: this drop isn't a new local hit.
@@ -616,9 +626,9 @@ return function(api)
     end
 
     handlers.C = function(amount)
-        amount = tonumber(amount)
+        amount = num(amount)
         local _, pawn = getPlayer1()
-        if amount and game.addCurrency then
+        if amount and amount > 0 and amount <= MAX_EVENT_DUST and game.addCurrency then
             game.addCurrency(pawn, amount)
         end
     end
@@ -875,13 +885,15 @@ return function(api)
             return
         end
         ticks = ticks + 1
+        -- Our snapshot goes out every NET_EVERY ticks; what arrived from the other side is read every tick (two
+        -- small file reads), so a fresh update is used within one frame instead of up to NET_EVERY frames later.
         if ticks % NET_EVERY == 0 then
             runStage("writeSnapshot", writeSnapshot)
-            runStage("readSnapshot", readSnapshot)
-            runStage("processEvents", processEvents)
-            if isClient() then
-                runStage("applyRemoteEnemies", clientEnemies)
-            end
+        end
+        runStage("readSnapshot", readSnapshot)
+        runStage("processEvents", processEvents)
+        if isClient() and ticks % NET_EVERY == 0 then
+            runStage("applyRemoteEnemies", clientEnemies)
         end
         runStage("steerGhost", steerGhost)
         for name, fn in pairs(extraTicks) do

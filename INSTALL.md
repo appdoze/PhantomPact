@@ -25,6 +25,8 @@ https://github.com/yhsharaf/PhantomPact/issues, with what happened (host or gues
    - **Host:** change `Role = Guest` to `Role = Host`
    - **Guest:** set `HostAddress` to the host's Tailscale IP (it starts with 100.; the host sees it in the
      Tailscale app)
+   - **Both (recommended):** set `Secret` to the same long phrase. Packets are then signed, so nobody else can
+     join your session or send fake events, even from your home network.
 4. Start the game and load your saves, the host first. Co-op starts by itself once you're in the world.
 
 The UE4SS console shows `Phantom Pact Host: co-op on` (or Guest), and
@@ -69,7 +71,11 @@ Not in PvP yet: executions (posture break only staggers), and you don't see your
   missing.
 - **"Python 3 wasn't found":** install Python 3 from python.org with "Add python to PATH" ticked, then restart the
   game.
-- **`connected=no`:** both on Tailscale? The right IP in the guest's `HostAddress`? Windows Firewall must allow
-  Python on private networks (Windows asks the first time the host plays; click Allow).
+- **`connected=no`:** both on Tailscale? The right IP in the guest's `HostAddress`? The same `Secret` on both PCs
+  (`net_status.txt` counts `rejected=` packets with a wrong secret)? Windows Firewall must allow Python on private
+  networks (Windows asks the first time the host plays; click Allow).
+- **Lag:** run `tailscale ping <partner's IP>`. "via DERP(...)" means Tailscale couldn't connect you directly and
+  relays through its servers, which adds latency; "via <ip>:<port>" is direct. A direct connection usually needs
+  UDP allowed out on both routers (most home routers do); see tailscale.com/kb/1082/firewall-ports.
 - **No `[PBZCoop] Loaded` line at all:** UE4SS isn't installed in `PBZ\platform\steam`, or the mod folder isn't at
   `platform\steam\ue4ss\Mods\PBZCoop`.

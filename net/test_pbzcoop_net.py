@@ -197,5 +197,114 @@ class RecordReplay(unittest.TestCase):
             self.assertIn("1 D sp:Boss 80.0 10.0", read(log))
 
 
+sys.path.insert(0, HERE)
+import pbzcoop_net  # noqa: E402  (unit tests of the relay's security helpers)
+
+
+class Security(unittest.TestCase):
+    def test_signed_packets_open_and_tampering_or_replay_is_dropped(self):
+        a, b = pbzcoop_net.Auth("correct horse"), pbzcoop_net.Auth("correct horse")
+        p1 = a.seal({"t": "state", "s": "P 1"})
+        self.assertEqual(b.open(p1)["s"], "P 1")
+        self.assertIsNone(b.open(p1), "a replayed packet is dropped")
+        p2 = bytearray(a.seal({"t": "state", "s": "P 2"}))
+        p2[10] ^= 1
+        self.assertIsNone(b.open(bytes(p2)), "a modified packet is dropped")
+        self.assertIsNone(pbzcoop_net.Auth("other").open(a.seal({"t": "ping"})), "a wrong secret is dropped")
+        self.assertIsNone(b.open(pbzcoop_net.Auth("").seal({"t": "ping"})), "an unsigned packet is dropped")
+        self.assertEqual(b.rejected, 3)
+
+    def test_address_filter(self):
+        ts = pbzcoop_net.ALLOWED_NETWORKS["tailscale"]
+        self.assertTrue(pbzcoop_net.address_allowed(("100.101.102.103", 1), ts))
+        self.assertTrue(pbzcoop_net.address_allowed(("127.0.0.1", 1), ts))
+        self.assertFalse(pbzcoop_net.address_allowed(("192.168.1.20", 1), ts))
+        self.assertFalse(pbzcoop_net.address_allowed(("8.8.8.8", 1), ts))
+        self.assertTrue(pbzcoop_net.address_allowed(("8.8.8.8", 1), pbzcoop_net.ALLOWED_NETWORKS["any"]))
+
+    def test_secret_comes_from_the_ini(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write(os.path.join(tmp, "PhantomPact.ini"), "Role = Host\nSecret = hunter2 ; shared\n")
+            self.assertEqual(pbzcoop_net.read_secret(tmp), "hunter2")
+            inst = os.path.join(tmp, "inst2")
+            os.makedirs(inst)
+            self.assertEqual(pbzcoop_net.read_secret(inst), "hunter2", "extra instances use the mod's ini")
+            write(os.path.join(tmp, "PhantomPact.ini"), "Secret = PUT-A-SHARED-SECRET-HERE\n")
+            self.assertEqual(pbzcoop_net.read_secret(tmp), "", "the placeholder means off")
+
+
+class SecureLoopback(RelayLoopback):
+    """Two relays with the same secret talk; a stranger's packets (wrong secret, or another source port to the
+    client) are counted and ignored."""
+
+    def secret(self, folder, value):
+        write(os.path.join(folder, "PhantomPact.ini"), f"Secret = {value}\n")
+
+    def status(self, folder):
+        return dict(kv.split("=", 1) for kv in read(os.path.join(folder, "net_status.txt")).split() if "=" in kv)
+
+    def test_shared_secret_connects(self):
+        self.secret(self.a, "s3cret")
+        self.secret(self.b, "s3cret")
+        write(os.path.join(self.a, "net_out.txt"), "P 1 1 2 3 0 0 0\n")
+        write(os.path.join(self.b, "net_out.txt"), "P 2 4 5 6 0 0 0\n")
+        self.start("host", "--dir", self.a, "--port", str(PORT))
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
+        self.assertTrue(wait_for(lambda: read(os.path.join(self.b, "net_in.txt")).startswith("P 1")))
+        self.assertTrue(wait_for(lambda: read(os.path.join(self.a, "net_in.txt")).startswith("P 2")))
+        self.assertTrue(wait_for(lambda: self.status(self.a).get("auth") == "on"))
+
+    def test_wrong_secret_never_connects(self):
+        self.secret(self.a, "s3cret")
+        self.secret(self.b, "guess")
+        write(os.path.join(self.b, "net_out.txt"), "P 2 4 5 6 0 0 0\n")
+        self.start("host", "--dir", self.a, "--port", str(PORT))
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
+        self.assertTrue(wait_for(lambda: int(self.status(self.a).get("rejected", 0)) > 5))
+        self.assertEqual(read(os.path.join(self.a, "net_in.txt")), "")
+        self.assertEqual(self.status(self.a).get("connected"), "no")
+
+    def test_client_ignores_packets_not_from_its_host(self):
+        import socket
+        write(os.path.join(self.b, "net_out.txt"), "P 2 4 5 6 0 0 0\n")
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
+        self.assertTrue(wait_for(lambda: self.status(self.b).get("role") == "client"))
+        # Find the client's port from its first packet to a fake "host", then spoof from another port.
+        fake = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        fake.bind(("127.0.0.1", PORT))
+        fake.settimeout(3)
+        _, client_addr = fake.recvfrom(65535)
+        fake.close()
+        stranger = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        stranger.sendto(b'{"t":"state","s":"P 99 0 0 0 0 0 0","v":2}', client_addr)
+        stranger.close()
+        self.assertTrue(wait_for(lambda: int(self.status(self.b).get("filtered", 0)) >= 1))
+        self.assertEqual(read(os.path.join(self.b, "net_in.txt")), "")
+
+
+class Latency(RelayLoopback):
+    def test_new_snapshots_go_out_immediately(self):
+        a_out, b_in = os.path.join(self.a, "net_out.txt"), os.path.join(self.b, "net_in.txt")
+        write(a_out, "P 0 0 0 0 0 0 0\n")
+        self.start("host", "--dir", self.a, "--port", str(PORT))
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
+        self.assertTrue(wait_for(lambda: read(b_in).startswith("P 0")))
+        delays = []
+        for seq in range(1, 16):
+            line = f"P {seq} 0 0 0 0 0 0\n"
+            t0 = time.perf_counter()
+            write(a_out, line)
+            while read(b_in) != line and time.perf_counter() - t0 < 1.0:
+                time.sleep(0.001)
+            delays.append(time.perf_counter() - t0)
+            time.sleep(0.013)
+        delays.sort()
+        median = delays[len(delays) // 2]
+        print(f"\nfile-to-file median {median * 1000:.1f} ms, max {delays[-1] * 1000:.1f} ms")
+        # Before: up to one 50 ms relay tick on top of the network (median ~35-50 ms here). Now: one 5 ms file
+        # check (median ~15-25 ms with the test's own polling); the bound only catches a return to tick-paced sends.
+        self.assertLess(median, 0.035)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
