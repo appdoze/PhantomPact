@@ -197,5 +197,114 @@ class RecordReplay(unittest.TestCase):
             self.assertIn("1 D sp:Boss 80.0 10.0", read(log))
 
 
+class FakeSteamNet:
+    """Stands in for Steam's P2P network: messages addressed by SteamID64, delivered in memory."""
+
+    def __init__(self):
+        self.inbox = {}
+
+    def link(self, my_id, friends_in_game, peer=None):
+        self.inbox.setdefault(my_id, [])
+        return FakeSteamLink(self, my_id, friends_in_game, peer)
+
+
+class FakeSteamLink:
+    """The relay's link interface (as SteamLink): send/receive by SteamID64, friends hosting as candidates."""
+
+    def __init__(self, net, my_id, friends_in_game, peer):
+        self.net, self.my_id, self.friends, self.peer = net, my_id, friends_in_game, peer
+
+    def send(self, addr, data):
+        self.net.inbox.setdefault(addr, []).append((self.my_id, data))
+
+    def receive(self):
+        out, self.net.inbox[self.my_id] = self.net.inbox[self.my_id], []
+        return out
+
+    def wait(self, seconds):
+        time.sleep(min(seconds, 0.002))
+        return True
+
+    def candidates(self):
+        return list(self.friends)
+
+    def describe(self, addr):
+        return f"friend{addr}"
+
+    def describe_self(self):
+        return f"Steam as {self.my_id}"
+
+
+class SteamRelayLogic(unittest.TestCase):
+    """The relay over a Steam-style link (everything but Valve's network itself, which needs two accounts)."""
+
+    HOST, GUEST, OTHER = 76561190000000001, 76561190000000002, 76561190000000003
+
+    def run_relays(self, relays, seconds=1.5):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            for r in relays:
+                r.tick(time.monotonic())
+            time.sleep(0.01)
+
+    def folders(self, tmp, *names):
+        out = []
+        for n in names:
+            d = os.path.join(tmp, n)
+            os.makedirs(d)
+            out.append(d)
+        return out
+
+    def test_guest_finds_the_hosting_friend_and_both_directions_flow(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            hd, gd = self.folders(tmp, "host", "guest")
+            write(os.path.join(hd, "net_out.txt"), "P 1 10 20 30 0 0 850 850 M\nE sp:Boss 1 2 3 0 2900 2900 1 1120 BP_X_C\n")
+            write(os.path.join(hd, "net_events_out.txt"), "S h1\n1 B sp:Boss\n2 K sp:Thug\n")
+            write(os.path.join(gd, "net_out.txt"), "P 1 11 21 31 0 0 850 850 M\n")
+            write(os.path.join(gd, "net_events_out.txt"), "S g1\n1 D sp:Boss 80.0 10.0 L\n")
+            host = relay.Relay("host", hd, None, 0, net.link(self.HOST, [self.GUEST]))
+            # The guest has two friends in the game; only the host answers pings, so it pins the host.
+            guest = relay.Relay("client", gd, None, 0, net.link(self.GUEST, [self.OTHER, self.HOST]))
+            self.run_relays([host, guest])
+            self.assertEqual(guest.peer, self.HOST)
+            self.assertEqual(host.peer, self.GUEST)
+            self.assertIn("E sp:Boss", read(os.path.join(gd, "net_in.txt")))
+            self.assertIn("P 1 11 21 31", read(os.path.join(hd, "net_in.txt")))
+            self.assertEqual(event_lines(os.path.join(gd, "net_events_in.txt")), ["1 B sp:Boss", "2 K sp:Thug"])
+            self.assertEqual(event_lines(os.path.join(hd, "net_events_in.txt")), ["1 D sp:Boss 80.0 10.0 L"])
+
+    def test_two_guests_never_pin_each_other_and_the_host_keeps_its_first(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            hd, g1d, g2d = self.folders(tmp, "host", "g1", "g2")
+            for d in (hd, g1d, g2d):
+                write(os.path.join(d, "net_out.txt"), "P 1 0 0 0 0 0 850 850 M\n")
+            host = relay.Relay("host", hd, None, 0, net.link(self.HOST, [self.GUEST, self.OTHER]))
+            g1 = relay.Relay("client", g1d, None, 0, net.link(self.GUEST, [self.OTHER, self.HOST]))
+            self.run_relays([host, g1], 0.6)
+            g2 = relay.Relay("client", g2d, None, 0, net.link(self.OTHER, [self.GUEST, self.HOST]))
+            self.run_relays([host, g1, g2], 1.5)
+            self.assertEqual(g1.peer, self.HOST)
+            self.assertEqual(host.peer, self.GUEST)    # pinned to the first guest while it keeps talking
+            self.assertNotEqual(g2.peer, self.GUEST)   # a guest never answers another guest's pings
+            self.assertIsNone(g2.peer)                 # the busy host doesn't take a second guest
+
+    def test_guest_given_a_steamid_talks_only_to_it(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            hd, gd = self.folders(tmp, "host", "guest")
+            write(os.path.join(hd, "net_out.txt"), "P 7 1 2 3 0 0 850 850 M\n")
+            write(os.path.join(gd, "net_out.txt"), "P 1 0 0 0 0 0 850 850 M\n")
+            host = relay.Relay("host", hd, None, 0, net.link(self.HOST, []))
+            guest = relay.Relay("client", gd, None, 0, net.link(self.GUEST, [], peer=self.HOST))
+            self.run_relays([host, guest])
+            self.assertEqual(guest.peer, self.HOST)
+            self.assertIn("P 7 1 2 3", read(os.path.join(gd, "net_in.txt")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
