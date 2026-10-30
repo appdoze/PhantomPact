@@ -279,7 +279,8 @@ return function(api)
         end
         local dead = zero and (os.clock() - net.zeroSince) >= 1.0
         local gone = net.partnerGone == true     -- see watchPartner
-        local hide = otherMap or dead or gone
+        -- In a cutscene the partner isn't really playing: their ghost would stand idle in your world.
+        local hide = otherMap or dead or gone or t.Cine == true
         if hide ~= net.ghostHidden then
             net.ghostHidden = hide
             pcall(function()
@@ -287,7 +288,8 @@ return function(api)
                 net.ghost:SetActorEnableCollision(net.ghostWalks and not hide)
             end)
             if hide then
-                log("Ghost hidden: the other player is " .. (gone and "gone" or dead and "down" or ("on map " .. tostring(t.Map))) .. ".")
+                log("Ghost hidden: the other player is " .. (gone and "gone" or dead and "down"
+                    or t.Cine and "in a cutscene" or ("on map " .. tostring(t.Map))) .. ".")
             else
                 log("Ghost visible again.")
             end
@@ -890,8 +892,11 @@ return function(api)
         if net.seq % 20 == 1 or net.localMap == nil then
             net.localMap = game.mapName and game.mapName(pawn) or "?"
         end
-        local lines = { string.format("P %d %.1f %.1f %.1f %.1f %.0f %.1f %.1f %s",
-            net.seq, loc.X, loc.Y, loc.Z, yaw, speed, hp or 0, maxhp or 0, net.localMap) }
+        -- Field 10 is the outfit in appdoze's fork ("-": we don't send one); field 11 is 1 while we're in a
+        -- cutscene. Older versions ignore both.
+        local cine = game.inCutscene and game.inCutscene() and 1 or 0
+        local lines = { string.format("P %d %.1f %.1f %.1f %.1f %.0f %.1f %.1f %s - %d",
+            net.seq, loc.X, loc.Y, loc.Z, yaw, speed, hp or 0, maxhp or 0, net.localMap, cine) }
         if isHost() then
             for _, l in ipairs(enemySnapshotLines(loc)) do
                 lines[#lines + 1] = l
@@ -931,13 +936,14 @@ return function(api)
         for line in text:gmatch("[^\r\n]+") do
             local kind = line:sub(1, 1)
             if kind == "P" then
-                local seq, x, y, z, yaw, speed, hp, maxhp, map = line:match(
-                    "^P (%d+) (%S+) (%S+) (%S+) (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
+                local seq, x, y, z, yaw, speed, hp, maxhp, map, _, cine = line:match(
+                    "^P (%d+) (%S+) (%S+) (%S+) (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
                 seq = tonumber(seq)
                 if seq ~= nil and seq ~= net.lastRemoteSeq then
                     local t = { X = num(x), Y = num(y), Z = num(z), Yaw = num(yaw),
                         Speed = num(speed), Hp = num(hp), MaxHp = num(maxhp),
-                        Map = (map ~= nil and map ~= "") and map or nil }
+                        Map = (map ~= nil and map ~= "") and map or nil,
+                        Cine = cine == "1" }
                     -- A position that doesn't parse (or is NaN) is dropped, not applied.
                     if t.X and t.Y and t.Z and t.Yaw then
                         local prev, steps = net.target, net.lastRemoteSeq and (seq - net.lastRemoteSeq) or 0

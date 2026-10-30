@@ -19,7 +19,7 @@ GitHub. Pieces are ported by hand into our own code, credited in comments ("from
 | Immediate send (files checked every 5 ms, sent on change; 1 ms Windows timer) | `Relay.wait`, `send_state`, `fine_timer` | The timer is released on exit. The mod keeps writing every ~48 ms (we didn't take their 33 ms, which would break our tick-counted timers) |
 | `eval` only with dev.txt / `PBZCOOP_DEBUG=1` | `main.lua` `runCommand` | `tools/install-mod.ps1` creates dev.txt (developer install only; the release zip has none) |
 | Game build check by PBZ.exe size (warning only) | `autostart.lua` (`KNOWN_BUILDS`) | Same |
-| In-game status tips (game's ink-bar tip) | new `mod/PBZCoop/Scripts/status.lua`, `tips` command | The tip is re-created after map travel (theirs went silent); matches our status keys; polls by time, not ticks |
+| In-game status tips (game's ink-bar tip) | new `mod/PBZCoop/Scripts/status.lua`, `tips` command | Created from the widget class (theirs needed one already on screen, so it never showed); re-created after map travel; matches our status keys; polls by time, not ticks. Seen on screen: `art/screenshots/status-tip.jpg` |
 | Dead reckoning for the partner's ghost | `coop.lua` `steerGhost`, snapshot `P` parsing | Velocity from snapshot numbers, not arrival times (jitter); off while the ghost is hidden or the partner is gone; shares our `lastRemoteAt` clock |
 | CI: relay tests on Windows + Ubuntu | `.github/workflows/tests.yml` | Read-only token, actions pinned by commit, Python job only (no Rust) |
 | Tips text reused | `status.lua` | Tailscale "via DERP" high-ping tip, Secret-mismatch tip |
@@ -57,9 +57,9 @@ equipment were only tried solo. The `pbzsave coop-sync` tool the gate/door featu
 
 | Piece | Decision | Why / what would have to change |
 |---|---|---|
-| Partner tips (partner down/back, health at 50%/25%, 150 m apart) | **To port** (with changes) | Safe and useful. It must use our `lastRemoteAt`/`partnerGone` (theirs uses a `targetAt` we don't have, so it would always say "no position"); our `status.lua` needs to export `notify`; drop the "press F5 to regroup" prompt unless regroup ships |
-| Cutscene awareness (cutscene flag in `P`, ghost hides) | **To port** (with changes) | Cache the sequence-manager lookup (theirs runs `FindFirstOf` 20x/s). Send `-` as field 10 and the flag as field 11 so their versions read it right. Add it to our ghost-hide rule |
-| `status.notify` export | **To port** | One line in our `status.lua` |
+| Partner tips (partner down/back, health at 50%/25%, cutscene, 150 m apart) | **Merged** in new `partner.lua` (+ `partner` command) | Uses our `lastRemoteAt`/`partnerGone`; no regroup prompt; time-based polling. Checked in game: 40% / 20% / down / back / 200 m tips all fired |
+| Cutscene awareness (cutscene flag in `P`, ghost hides) | **Merged** (`pbz.lua` `game.inCutscene`, `coop.lua`) | The manager lookup is cached (retried every 2 s while missing). We send `-` as field 10 (their outfit slot) and the flag as field 11, so their versions read it right; added to our ghost-hide rule |
+| `status.notify` export | **Merged** | Plus a real fix to their tip widget: it copied an on-screen instance, and there are none until the game shows a tip itself, so their tips never appeared. Ours creates it from the class (`WB_TipsText_C`); seen on screen |
 | Regroup (F5 teleport to the partner, `TeleportToTargetPoint`) | **Deferred** (option, default Off) | It takes the partner's map name and coordinates unchecked, so it can load any level. A chapter-1 guest can jump into a chapter-5 area (story skip, kept by autosave). No check for own death/spectating, cutscenes, PvP, boss fog, loading or partner gone; no ground check (can land in the void). Needed: same map only or an allowed-map list plus "area already unlocked here", bounded coordinates, all those refusals, a ground trace |
 | Equipment sharing (`J`: accessories, medicine, weapons, Phantom Edge) | **Deferred** (option, default Off), or skip | Critical: the baseline isn't reset when you load another save, so loading a late save mid-session copies your whole inventory to the partner, permanently. Any id the backpack accepts is granted (debug/DLC/boss gear), in both directions, with no host decision. It overlaps our `I` pickups (double grants). Needed: per-save baseline, an id allow-list, never re-send received items, a per-session cap |
 | Shared gates, doors, shortcuts, ropes, cages (`A` events, `shared_world.txt`) | **Skipped** | Progression blockers written into any save through a ledger with no save/partner key; `BP_NarrativeCage_C` is likely quest-bound; depends on a `pbzsave` tool that isn't in the repo |
@@ -68,6 +68,21 @@ equipment were only tried solo. The `pbzsave coop-sync` tool the gate/door featu
 | `ShareCodex` on by default | **Skipped** | We keep codex sharing off both ways (raw TSet write from Lua) |
 | `relay/tests/mod_logic.rs` | **Skipped** (idea kept) | It needs the Rust relay we skipped and runs against stubs. The idea of testing the Lua logic with fakes is worth copying in our own harness |
 | README/COOP_GUIDE edits, version 1.4.0/1.5.0 | **Skipped** | Overstated claims; version is ours. Reusable fact: time of day and weather are fixed per area, so players in one area already share them |
+
+## PR #5's newest additions (1.6.0 / 1.7.0): not reviewed yet
+
+Added to PR #5 on 2026-10-30 after the 1.4/1.5 review (commits f33b0c3 and 6c62833, about 680 lines; local
+branch `review/pr-5-now`).
+
+| Piece | Status |
+|---|---|
+| Live gates and doors | not reviewed (the related shared-world feature was skipped) |
+| Partner's moves played as montages (`moves.lua`) | not reviewed |
+| Revive | not reviewed (we chose "each player's death stays their own"; needs a design decision) |
+| Shared dialogue | not reviewed |
+| Partner HUD and map marker (`hud.lua`) | not reviewed |
+| Live kick-down stones | not reviewed |
+| Regroup on join | not reviewed (regroup itself is deferred) |
 
 ## Credit
 

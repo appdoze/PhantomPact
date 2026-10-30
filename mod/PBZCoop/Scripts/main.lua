@@ -439,6 +439,7 @@ api.game = dofile(SCRIPT_DIR .. "pbz.lua")(api)
 local coop = dofile(SCRIPT_DIR .. "coop.lua")(api)
 api.coop = coop
 api.status = dofile(SCRIPT_DIR .. "status.lua")(api)
+api.partner = dofile(SCRIPT_DIR .. "partner.lua")(api)
 api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
 api.scaling = dofile(SCRIPT_DIR .. "scaling.lua")(api)
 local net = coop.net
@@ -491,6 +492,7 @@ end
 COMMANDS.pvp = api.pvp.command
 COMMANDS.scale = api.scaling.command
 COMMANDS.tips = api.status.command
+COMMANDS.partner = api.partner.command
 
 local function readCommandFile()
     local path = modDir() .. "cmd.txt"

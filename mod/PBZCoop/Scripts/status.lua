@@ -16,6 +16,7 @@ return function(api)
     local HIGH_PING_MS = 250        -- warn when the round trip stays above this...
     local HIGH_PING_FOR = 5         -- ...for this many reads in a row
     local REPEAT_S = 60             -- the same warning at most once a minute
+    local TIP_CLASS = "/Game/PBZContent/UI/InGame/SwitchUI/WB_TipsText.WB_TipsText_C"
 
     local status = { on = true, last = {}, lastShown = {}, highPingReads = 0, buildShown = false }
     local nextPoll = 0
@@ -29,12 +30,21 @@ return function(api)
         pcall(function()
             local onScreen = valid(tip) and select(2, pcall(function() return tip:IsInViewport() end)) == true
             if not onScreen then
-                local sample = FindFirstOf("WB_TipsText_C")
+                -- Made from the widget's class: copying an instance on screen (as first written) found none until
+                -- the game had shown a tip itself, so tips never appeared.
+                local cls = FindObject("WidgetBlueprintGeneratedClass", "WB_TipsText_C")
+                if not valid(cls) then
+                    cls = StaticFindObject(TIP_CLASS)
+                end
+                if not valid(cls) and type(LoadAsset) == "function" then
+                    pcall(LoadAsset, TIP_CLASS)
+                    cls = StaticFindObject(TIP_CLASS)
+                end
                 local pc = api.getPlayer1()
-                if not (valid(sample) and valid(pc)) then
+                if not (valid(cls) and valid(pc)) then
                     return
                 end
-                tip = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(pc, sample:GetClass(), pc)
+                tip = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(pc, cls, pc)
                 tip:AddToViewport(400)
             end
             tip:SetVisibility(3)                    -- HitTestInvisible: seen, never clicked
@@ -124,6 +134,8 @@ return function(api)
             notify("build", api.gameBuildWarning)
         end
     end
+
+    status.notify = notify          -- other modules' tips (partner.lua)
 
     -- tips on|off, tips <text> (show a test tip), tips (print the relay's status)
     function status.command(args)

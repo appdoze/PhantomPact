@@ -1096,6 +1096,25 @@ return function(api)
     end
 
     -- Short name of the current map, so a ghost from another map isn't shown in this one.
+    -- In a cutscene: the game's own level-sequence manager. The manager is looked up again only every 2 s while
+    -- it isn't found (this runs with every snapshot). (From appdoze's PR #5.)
+    local seqManager, seqLookupAt = nil, -1e9
+    function game.inCutscene()
+        if not valid(seqManager) then
+            local now = os.clock()
+            if now - seqLookupAt < 2.0 then
+                return false
+            end
+            seqLookupAt = now
+            seqManager = FindFirstOf("PBZLevelSequenceManager")
+            if not valid(seqManager) then
+                return false
+            end
+        end
+        local ok, playing = pcall(function() return seqManager:IsInSequence() end)
+        return ok and playing == true
+    end
+
     function game.mapName(contextActor)
         local ok, name = pcall(function() return api.gs():GetCurrentLevelName(contextActor, true):ToString() end)
         return ok and name or "?"
