@@ -19,18 +19,31 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 - Shared boss fights: the boss health bar and arena fog walls for both players
 - Shared loot and dust: what either player picks up or earns goes to both
 - Shared resting: rest at a bell and enemies respawn for both
+- Shared progress (`ShareProgress = On`): quests, bells, enemy-group rewards, challenge points (Banyan Heart,
+  Dragon Pillar, Scarecrow), codex entries, opened chests and broken rubbish piles follow both players, applied
+  through the game's own functions
 - Elden Ring–style co-op difficulty: enemies and bosses get more health and posture while you play together
 - PvP duels (`PvP = On`): the game's own block, parry and dodge; parries stagger the attacker; the loser dies
+- In-game status tips: partner connected or lost, settings that differ between the two PCs
 
 ## Quick start
 
-1. Install [UE4SS for Phantom Blade Zero](https://www.nexusmods.com/phantombladezero/mods/5), [Python 3](https://www.python.org/downloads/) and [Tailscale](https://tailscale.com) (both players).
-2. Extract the release zip into the game's `PBZ` folder.
-3. In `platform\steam\ue4ss\Mods\PBZCoop\PhantomPact.ini`: host sets `Role = Host`, guest sets `HostAddress` to
-   the host's Tailscale IP.
+1. Install [UE4SS for Phantom Blade Zero](https://www.nexusmods.com/phantombladezero/mods/5) (both players).
+2. Extract the release zip into the game's `PBZ` folder. It includes the native relay (`pbzcoop_relay.exe`), so no
+   Python is needed; with the script-only zip, install [Python 3](https://www.python.org/downloads/) instead.
+3. In `platform\steam\ue4ss\Mods\PBZCoop\PhantomPact.ini`: host sets `Role = Host`, guest sets `Role = Guest`, and
+   both pick a `Network` (below).
 4. Start the game and load your saves, the host first. Co-op starts by itself.
 
-Early release, 2 players. Connecting is over Tailscale for now; Steam joining is planned.
+## Ways to connect
+
+| `Network =` | What you need | Notes |
+|---|---|---|
+| `Steam` | Steam friends, both in the game | No IP addresses or port forwarding; `PartnerSteamID = Auto` finds your friend. Encrypted by Steam |
+| `Tailscale` (default) | [Tailscale](https://tailscale.com) on both PCs | Guest sets `HostAddress` to the host's Tailscale IP. Only Tailscale addresses are accepted |
+| `Direct` | Host forwards UDP 47800 (UPnP does it automatically) | Needs the same `Secret` on both PCs: packets are AES-256-GCM encrypted |
+
+Set a `Secret` (the same on both PCs) with any network for encrypted, authenticated packets. Early release, 2 players.
 
 ## Ground rules
 
@@ -43,16 +56,16 @@ Early release, 2 players. Connecting is over Tailscale for now; Steam joining is
 
 | Path | What it is |
 |---|---|
-| [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `autostart.lua` (reads `PhantomPact.ini`, starts the relay, turns sync on), `main.lua` (loader, commands) |
-| [net/pbzcoop_net.py](net/pbzcoop_net.py) | Relay over UDP (Tailscale): snapshots + reliable events; host, client, echo, record/replay |
-| [relay/](relay/) | Native relay (Rust): drop-in for the Python relay, same protocol, no Python needed ([docs/NATIVE_PLUGIN.md](docs/NATIVE_PLUGIN.md)); `cargo build --release --manifest-path relay\Cargo.toml` |
+| [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `sync.lua` (shared progress), `status.lua` (in-game tips), `autostart.lua` (reads `PhantomPact.ini`, starts the relay, turns sync on), `main.lua` (loader, commands) |
+| [relay/](relay/) | Native relay (Rust, `pbzcoop_relay.exe`): UDP / Steam transport, AES-GCM, UPnP; no Python needed ([docs/NATIVE_PLUGIN.md](docs/NATIVE_PLUGIN.md)). `cargo test --release --manifest-path relay\Cargo.toml` also compile-checks every mod script |
+| [net/pbzcoop_net.py](net/pbzcoop_net.py) | Python relay, same protocol (the two interoperate): snapshots + reliable events; host, client, echo, record/replay |
 | [net/test_pbzcoop_net.py](net/test_pbzcoop_net.py) | Relay tests: `python -I net\test_pbzcoop_net.py` (also runs native and mixed native/Python pairs once relay/ is built) |
 | [net/pbzcoop_bot.py](net/pbzcoop_bot.py) | Bot partner for live tests without a second PC |
 | [tools/pbz-coop.ps1](tools/pbz-coop.ps1) | Developer launcher: relay + `neton` by hand (`-Role host/client/echo/loop/record/replay`, `-Stop`) |
 | [tools/install-mod.ps1](tools/install-mod.ps1) | Installs the mod into the game's UE4SS `Mods` folder (finds the game through Steam) |
 | [tools/pbz-e2e.ps1](tools/pbz-e2e.ps1) | End-to-end test: two copies of the game on one PC, PASS/FAIL per feature; `-Auto` tests the player setup (ini, self-started relays) |
 | [tools/pbz-selftest.ps1](tools/pbz-selftest.ps1) | Starts two copies with `-allowmultipleinstances` plus relays; `-Stop` |
-| [tools/make-release.ps1](tools/make-release.ps1) | Builds `dist\PhantomPact-<version>.zip` |
+| [tools/make-release.ps1](tools/make-release.ps1) | Builds `dist\PhantomPact-<version>.zip` (`-NativeRelay` includes the exe) |
 | [docs/COOP_GUIDE.md](docs/COOP_GUIDE.md) | What syncs and how: protocol, enemy matching, tests and results |
 | [docs/RECON_NOTES.md](docs/RECON_NOTES.md) | Classes, functions and data tables found in the game |
 
