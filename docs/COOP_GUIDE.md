@@ -86,8 +86,7 @@ the client logic runs on the echoed data, so host and client code both run in on
 
 Not synced: enemy AI targets in the client world are its own (positions/health are pulled to the host's);
 cutscenes themselves (each player watches their own; the partner's ghost hides meanwhile); dialogue choices
-(lines are shown, choices stay each player's); the story cage (opening it is a quest step; recorded for the next
-load; regroup gets you past); switch devices and other back-and-forth mechanisms; spending currency. Death itself stays
+(lines are shown, choices stay each player's); cage doors (see Cages below); switch devices and other back-and-forth mechanisms; spending currency. Death itself stays
 in each player's game: revive brings the downed player back to their partner after their own respawn.
 
 Not needed: time of day and weather. In game, "Animate Time Of Day" is off and random weather is off: each area
@@ -234,3 +233,20 @@ block (no damage, posture 300 -> 209), timed parry rewarded (tap 150 ms after th
 `WON`/`lost` on both, both heal). Not done yet: executions (the ghost's posture is kept full), showing the
 partner's guard pose (the ghost can't play `GA_Hun_Young_Stance`), Phantom Edge weapons and weapon skills like
 `GA_Hun_Iron_C` (activates but didn't hit; may not be a strike).
+
+## Cages
+
+Read in game (Dengding Mountain Road, Fujizhilin), nothing opened. Every cage door is the game's story cage
+(`PBZNarrativeCage`), opened by the player's own interaction:
+
+- Wooden cages (`BP_NarrativeCage_C`, 4 in Dengding Mountain Road, 1 in Fujizhilin) hold characters: JiangHuRenShi
+  was inside one; quest scripts open others for Song Xiaowu, Lu Sanqian and Zhou Pingzi. Opening one is that
+  character's quest step.
+- Iron cages (`BP_NarrativeCage_Iron_C`, 5 in Dengding Mountain Road) hang from their own lift
+  (`BP_Lift_ForIronCage_C`, a `BP_Lift_C`) worked by a switch device (`BP_SwitchDevice_Cage_Device_C`, a keyed
+  puzzle). Inside: a character (Liu Yi in one), or loot as a rubbish pile (`DengDingShanDao.I_10006` in another)
+  with a character spawner.
+
+Shared: the iron cages' lifts (lift events, so a cage your partner lowered is lowered for you too) and the loot
+rubbish piles inside them. Not opened by the mod: the cage doors themselves, since they are quest steps or need the
+player's interaction; the Fujizhilin wooden cage is recorded for the next load by pbzsave coop-sync.
