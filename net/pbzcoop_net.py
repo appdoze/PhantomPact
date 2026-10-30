@@ -25,14 +25,20 @@ Usage:
 import collections
 
 import argparse
+import hashlib
+import hmac
+import ipaddress
 import json
 import os
+import re
+import struct
 import select
 import socket
 import time
 
 PORT = 47800
 TICK = 0.05          # 20 sends per second
+WATCH = 0.005        # how often the mod's files are checked for something new to send at once
 PING_EVERY = 1.0
 PEER_TIMEOUT = 3.0
 PROTOCOL = 2
@@ -92,7 +98,9 @@ def parse_events(text):
             continue
         if parts[0] == "S" and len(parts) == 2:
             session = parts[1].strip()
-        elif parts[0].isdigit():
+        elif parts[0].isascii() and parts[0].isdigit() and len(parts[0]) <= 12:
+            # (isdigit() alone also takes "²" and 5000-digit strings, which int() refuses: one bad line from the
+            # peer would kill the relay.)
             events.append((int(parts[0]), line))
     return session, events
 
@@ -123,13 +131,110 @@ class EventInbox:
         return self.last_id
 
 
+# Where a partner can be: Tailscale (100.64.0.0/10), home networks, this PC, and the Hamachi (25/8) and Radmin
+# (26/8) VPN ranges. The host takes packets only from these by default ("--allow any" lifts it): before, anyone
+# the firewall let through could take the partner's place or inject events. (Raised by appdoze, PR #2.)
+PARTNER_NETWORKS = [ipaddress.ip_network(n) for n in (
+    "100.64.0.0/10", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8",
+    "25.0.0.0/8", "26.0.0.0/8")]
+MAX_PACKETS_PER_RECEIVE = 256   # a flood can't keep the relay reading forever (ticks and status would stall)
+
+
+def address_allowed(ip, allow):
+    if allow == "any":
+        return True
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a in n for n in PARTNER_NETWORKS)
+
+
+class Auth:
+    """Optional shared secret (Secret = ... in PhantomPact.ini, the same on both PCs): every packet is signed.
+
+    packet = MAGIC | role (1) | session (8) | counter (8) | time ms (8) | payload | HMAC-SHA256 (32)
+
+    A relay refuses packets that are unsigned, wrongly signed, from its own role or own session (a packet bounced
+    back at its sender), older or newer than REPLAY_WINDOW_S, or not newer than the last one from that session
+    (replays). The key is stretched with scrypt, so one captured packet doesn't make guessing a typed secret cheap.
+    (Signing, the session counter and refusing downgrades are from appdoze's PR #2; the role/own-session check, the
+    time window and scrypt are fixes from reviewing it.)
+    """
+
+    MAGIC = b"PPA1"
+    HEADER = struct.Struct(">c8sQQ")
+    TAG = 32
+    REPLAY_WINDOW_S = 120.0
+    SESSIONS_KEPT = 8
+
+    def __init__(self, secret, role):
+        master = hashlib.scrypt(secret.encode("utf-8"), salt=b"PhantomPact/relay/1", n=2 ** 14, r=8, p=1, dklen=32)
+        self.key = hmac.new(master, b"packet-mac", hashlib.sha256).digest()
+        self.role = b"H" if role == "host" else b"C"
+        self.session = os.urandom(8)
+        self.counter = 0
+        self.last_seen = collections.OrderedDict()   # session -> highest counter accepted
+
+    def seal(self, payload):
+        self.counter += 1
+        head = self.MAGIC + self.HEADER.pack(self.role, self.session, self.counter, int(time.time() * 1000))
+        body = head + payload
+        return body + hmac.new(self.key, body, hashlib.sha256).digest()
+
+    def open(self, data):
+        """The payload of a valid packet from the other side, or None."""
+        n = len(self.MAGIC) + self.HEADER.size
+        if len(data) < n + self.TAG or not data.startswith(self.MAGIC):
+            return None
+        body, tag = data[:-self.TAG], data[-self.TAG:]
+        if not hmac.compare_digest(tag, hmac.new(self.key, body, hashlib.sha256).digest()):
+            return None
+        role, session, counter, sent_ms = self.HEADER.unpack(body[len(self.MAGIC):n])
+        if role == self.role or session == self.session:
+            return None
+        if abs(time.time() * 1000 - sent_ms) > self.REPLAY_WINDOW_S * 1000:
+            return None
+        if counter <= self.last_seen.get(session, 0):
+            return None
+        self.last_seen[session] = counter
+        self.last_seen.move_to_end(session)
+        while len(self.last_seen) > self.SESSIONS_KEPT:
+            self.last_seen.popitem(last=False)
+        return body[n:]
+
+
+# Settings both players should share; each relay reads them from its own PhantomPact.ini and tells the other.
+SHARED_SETTINGS = ("coopenemyhealth", "coopenemyposture", "pvp", "pvpdamage", "pvpparryposture", "connect")
+HELLO_EVERY = 2.0
+
+
+def read_ini(path):
+    """Key (lowercase) -> value from PhantomPact.ini; ';' and '#' start comments. {} if there's no file."""
+    out = {}
+    for line in read_text(path).splitlines():
+        line = line.strip()
+        if not line or line[0] in ";#" or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        out[key.strip().lower()] = value.strip()
+    return out
+
+
+def clean_token(value, limit=32):
+    """A peer-sent value made safe for the space-separated status line (no spaces, newlines or '=')."""
+    return re.sub(r"[^\w.\-]", "", str(value))[:limit] or "?"
+
+
 class UdpLink:
     """Plain UDP (Tailscale or LAN IPs). Peers are (ip, port) tuples."""
 
-    def __init__(self, role, peer, port):
+    def __init__(self, role, peer, port, allow="partner"):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
         self.sock.bind(("0.0.0.0", port if role == "host" else 0))
+        self.allow = allow
+        self.filtered = 0
         # Resolved once (a Tailscale name works too): replies are matched against this exact address.
         self.peer = (socket.gethostbyname(peer), port) if role != "host" else None
 
@@ -138,15 +243,21 @@ class UdpLink:
 
     def receive(self):
         out = []
-        while True:
+        for _ in range(MAX_PACKETS_PER_RECEIVE):
             try:
                 data, addr = self.sock.recvfrom(65535)
             except BlockingIOError:
-                return out
+                break
             except ConnectionResetError:
                 # Windows reports ICMP "port unreachable" this way while the peer isn't running yet.
                 continue
-            out.append((addr, data))
+            if self.peer is not None and addr != self.peer:
+                self.filtered += 1      # a client listens to its host's exact address and port only
+            elif self.peer is None and not address_allowed(addr[0], self.allow):
+                self.filtered += 1
+            else:
+                out.append((addr, data))
+        return out
 
     def wait(self, seconds):
         """True once a packet is waiting (or False when the time ran out)."""
@@ -218,14 +329,23 @@ class SteamLink:
 
 
 class Relay:
-    def __init__(self, role, folder, peer, port, link=None):
+    def __init__(self, role, folder, peer, port, link=None, allow="partner", secret=None, settings=None,
+                 version="?"):
         self.role = role
         self.out_path = os.path.join(folder, "net_out.txt")
         self.in_path = os.path.join(folder, "net_in.txt")
         self.events_out_path = os.path.join(folder, "net_events_out.txt")
         self.status_path = os.path.join(folder, "net_status.txt")
         self.inbox = EventInbox(os.path.join(folder, "net_events_in.txt"))
-        self.link = link or UdpLink(role, peer, port)
+        self.link = link or UdpLink(role, peer, port, allow)
+        self.auth = Auth(secret, role) if secret else None
+        self.rejected = 0                 # packets refused by the secret check (forged, replayed, or no/other secret)
+        self.settings = {k: str(v).lower() for k, v in (settings or {}).items() if k in SHARED_SETTINGS}
+        self.version = clean_token(version)
+        self.partner_version = None
+        self.mismatch = []
+        self.last_hello = 0.0
+        self.out_signature = None         # (mtime, size) of the mod's files when last sent
         self.peer = self.link.peer        # host: learned from the first packet; Steam guest: maybe found later
         self.last_heard = 0.0
         self.rtt_ms = None
@@ -241,14 +361,27 @@ class Relay:
         if to is None:
             return
         msg["v"] = PROTOCOL
+        data = json.dumps(msg, separators=(",", ":")).encode()
+        if self.auth:
+            data = self.auth.seal(data)
         try:
-            self.link.send(to, json.dumps(msg, separators=(",", ":")).encode())
+            self.link.send(to, data)
             self.sent += 1
         except OSError:
             pass
 
     def receive_all(self, now):
         for addr, data in self.link.receive():
+            # Checked before anything else (before a host takes a sender as its partner): with a secret only
+            # validly signed packets count; without one, signed packets mean the partner set a secret we don't have.
+            if self.auth:
+                data = self.auth.open(data)
+                if data is None:
+                    self.rejected += 1
+                    continue
+            elif data.startswith(Auth.MAGIC):
+                self.rejected += 1
+                continue
             try:
                 msg = json.loads(data)
             except ValueError:
@@ -273,7 +406,9 @@ class Relay:
             kind = msg.get("t")
             if kind == "ping":
                 self.send({"t": "pong", "ts": msg.get("ts")})
-            elif kind == "pong" and isinstance(msg.get("ts"), (int, float)):
+            elif kind == "pong" and isinstance(msg.get("ts"), (int, float)) and not isinstance(msg["ts"], bool) \
+                    and abs(msg["ts"]) < 1e12:
+                # (A 400-digit JSON integer here raised OverflowError and killed the relay.)
                 self.rtt_ms = (now - msg["ts"]) * 1000.0
             elif kind == "state":
                 if isinstance(msg.get("s"), str):
@@ -289,16 +424,35 @@ class Relay:
                 # Taken as is, even when lower: a restarted peer relay starts its inbox over and acks 0, and
                 # only then do we resend the events it lost.
                 self.acked[msg["sid"]] = msg["id"]
+            elif kind == "hello" and isinstance(msg.get("cfg"), dict):
+                self.partner_version = clean_token(msg.get("ver"))
+                theirs = {k: clean_token(v).lower() for k, v in msg["cfg"].items() if k in SHARED_SETTINGS}
+                self.mismatch = sorted(k for k in self.settings if k in theirs and theirs[k] != self.settings[k])
+
+    def _out_signature(self):
+        sig = []
+        for path in (self.out_path, self.events_out_path):
+            try:
+                st = os.stat(path)
+                sig.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                sig.append(None)
+        return tuple(sig)
 
     def wait(self, seconds):
-        """Sleep until the next tick, but handle incoming packets the moment they arrive."""
+        """Sleep until the next tick, but handle incoming packets the moment they arrive, and send the mod's
+        snapshot or events the moment it writes them (checked every WATCH s) instead of on the next tick."""
         deadline = time.monotonic() + seconds
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
-            if self.link.wait(remaining):
+            if self.link.wait(min(remaining, WATCH)):
                 self.receive_all(time.monotonic())
+            sig = self._out_signature()
+            if sig != self.out_signature:
+                self.out_signature = sig
+                self.send_state()
 
     def tick(self, now):
         self.receive_all(now)
@@ -314,10 +468,16 @@ class Relay:
             else:
                 self.send({"t": "ping", "ts": now})
             self.last_ping = now
+        if self.peer is not None and now - self.last_hello >= HELLO_EVERY:
+            self.send({"t": "hello", "ver": self.version, "cfg": self.settings})
+            self.last_hello = now
+        # Resent every tick even if unchanged, so a dropped packet heals itself (wait() also sends on change).
+        self.send_state()
+
+    def send_state(self):
         msg = {"t": "state"}
         snapshot = read_text(self.out_path)
         if snapshot.strip():
-            # Resend the newest snapshot every tick even if unchanged, so a dropped packet heals itself.
             msg["s"] = snapshot[:MAX_SNAPSHOT_BYTES]
         session, events = parse_events(read_complete_lines(self.events_out_path))
         if session is not None:
@@ -337,6 +497,9 @@ class Relay:
         via = "steam" if isinstance(self.link, SteamLink) else "udp"
         return (f"role={self.role} via={via} connected={'yes' if connected else 'no'} peer={peer} "
                 f"rtt_ms={rtt} sent={self.sent} received={self.received} "
+                f"filtered={getattr(self.link, 'filtered', 0)} rejected={self.rejected} "
+                f"auth={'on' if self.auth else 'off'} version={self.version} "
+                f"partner_version={self.partner_version or '-'} mismatch={','.join(self.mismatch) or '-'} "
                 f"events_acked={self.events_acked} events_in={self.inbox.last_id} time={int(time.time())}")
 
 
@@ -490,6 +653,18 @@ def run_replay(folder, path, seconds, client_log):
 ALIVE_TIMEOUT = 30.0     # s without a heartbeat from the mod before a relay the mod started gives up
 
 
+def fine_timer(on):
+    """Windows sleeps in ~15.6 ms steps by default, too coarse for WATCH: ask for 1 ms while the relay runs."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        winmm = ctypes.WinDLL("winmm")
+        (winmm.timeBeginPeriod if on else winmm.timeEndPeriod)(1)
+    except (OSError, AttributeError):
+        pass
+
+
 def game_alive(path, timeout):
     """The mod rewrites its heartbeat file (a unix time) every few seconds while the game runs."""
     try:
@@ -508,6 +683,12 @@ def main():
     ap.add_argument("--peer", help="client only: the host's Tailscale IP (udp); with --transport steam, the host's "
                                    "Steam name or SteamID64, or nothing to find any friend hosting in the game")
     ap.add_argument("--transport", choices=["udp", "steam"], default="udp")
+    ap.add_argument("--allow", choices=["partner", "any"], default="partner",
+                    help="host over UDP: take packets only from Tailscale, home-network and Hamachi/Radmin addresses "
+                         "(partner, default) or from anywhere (any)")
+    ap.add_argument("--ini", help="the player's PhantomPact.ini: Secret (optional, same on both PCs) and the settings "
+                                  "both players should share are read from it (the secret stays off the command line)")
+    ap.add_argument("--mod-version", default="?", help="the mod's version, told to the partner")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--seconds", type=float, default=0, help="stop after this long (0 = run until Ctrl+C)")
     ap.add_argument("--alive-file", help="stop once this file (the mod's heartbeat: a unix time) is older than "
@@ -529,9 +710,16 @@ def main():
             run_replay(args.dir, args.file, args.seconds, args.client_log)
         return
 
+    ini = read_ini(args.ini) if args.ini else {}
+    secret = ini.get("secret", "")
+    if secret.upper().startswith("PUT-") or secret.lower() in ("", "off", "none"):
+        secret = None
     link = SteamLink(args.role, args.peer, args.dir) if args.transport == "steam" else None
-    relay = Relay(args.role, args.dir, args.peer, args.port, link)
-    print(f"PBZCoop relay {args.role} on {relay.link.describe_self()}, files in {args.dir}", flush=True)
+    relay = Relay(args.role, args.dir, args.peer, args.port, link, allow=args.allow, secret=secret,
+                  settings=ini, version=args.mod_version)
+    print(f"PBZCoop relay {args.role} on {relay.link.describe_self()}, files in {args.dir}"
+          f"{', packets signed (Secret set)' if secret else ''}", flush=True)
+    fine_timer(True)
     start = time.monotonic()
     last_status = 0.0
     try:
@@ -552,6 +740,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        fine_timer(False)
         write_atomic(relay.status_path, f"role={args.role} connected=no stopped=yes\n")
 
 

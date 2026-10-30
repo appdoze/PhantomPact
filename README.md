@@ -57,6 +57,9 @@ Early release, 2 players. Connecting is over Tailscale for now; Steam joining is
 
 ## Credits
 
+- **[appdoze](https://github.com/appdoze)**, for the relay security review and code: packet signing, sender
+  filtering, event value checks, faster sending, the settings handshake, in-game status tips and smoother partner
+  movement
 - **Vercadi**, for UE4SS for Phantom Blade Zero, which made modding this game possible
 - **The UE4SS team** ([RE-UE4SS](https://github.com/UE4SS-RE/RE-UE4SS))
 - **S-GAME and the game's developers** for Phantom Blade Zero

@@ -306,5 +306,123 @@ class SteamRelayLogic(unittest.TestCase):
             self.assertIn("P 7 1 2 3", read(os.path.join(gd, "net_in.txt")))
 
 
+class Security(unittest.TestCase):
+    """Optional Secret, sender filter and the crashes a single bad packet used to cause (review of PR #2)."""
+
+    def test_signed_packets_open_and_bad_ones_are_refused(self):
+        relay = load_relay_module()
+        host, guest = relay.Auth("hunter2-but-longer", "host"), relay.Auth("hunter2-but-longer", "client")
+        p = host.seal(b'{"t":"state"}')
+        self.assertEqual(guest.open(p), b'{"t":"state"}')
+        self.assertIsNone(guest.open(p), "a replayed packet was accepted")
+        tampered = bytearray(host.seal(b'{"t":"state","s":"P 1"}'))
+        tampered[30] ^= 1
+        self.assertIsNone(guest.open(bytes(tampered)), "a tampered packet was accepted")
+        self.assertIsNone(host.open(host.seal(b"x")), "a packet bounced back at its sender was accepted")
+        other_host = relay.Auth("hunter2-but-longer", "host")
+        self.assertIsNone(host.open(other_host.seal(b"x")), "a packet from the same role was accepted")
+        self.assertIsNone(relay.Auth("other secret", "client").open(host.seal(b"x")), "wrong secret accepted")
+        self.assertIsNone(guest.open(b'{"t":"state"}'), "an unsigned packet was accepted with a secret set")
+        # Old enough to be outside the window: refused even though nothing from that session was seen.
+        stale = relay.Auth("hunter2-but-longer", "host")
+        real_time = relay.time.time
+        relay.time.time = lambda: real_time() - relay.Auth.REPLAY_WINDOW_S - 5
+        old = stale.seal(b"x")
+        relay.time.time = real_time
+        self.assertIsNone(guest.open(old), "a packet from minutes ago was accepted")
+
+    def test_partner_addresses_only_by_default(self):
+        relay = load_relay_module()
+        for ip in ("100.101.102.103", "192.168.1.20", "10.0.0.5", "172.20.1.1", "127.0.0.1", "25.1.2.3", "26.9.9.9"):
+            self.assertTrue(relay.address_allowed(ip, "partner"), ip)
+        for ip in ("8.8.8.8", "203.0.113.7", "not-an-ip"):
+            self.assertFalse(relay.address_allowed(ip, "partner"), ip)
+        self.assertTrue(relay.address_allowed("8.8.8.8", "any"))
+
+    def test_one_bad_packet_no_longer_kills_the_relay(self):
+        relay = load_relay_module()
+        self.assertEqual(relay.parse_events("S 1\n² K x\n" + "9" * 5000 + " K y\n1 K ok\n")[1], [(1, "1 K ok")])
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            r = relay.Relay("host", tmp, None, 0, net.link(1, []))
+            net.inbox[1].append((2, b'{"v":2,"t":"pong","ts":' + b"9" * 400 + b"}"))
+            net.inbox[1].append((2, b'{"v":2,"t":"pong","ts":true}'))
+            r.receive_all(time.monotonic())          # must not raise
+            self.assertIsNone(r.rtt_ms)
+
+    def test_settings_mismatch_is_reported_and_values_are_cleaned(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            hd, gd = os.path.join(tmp, "h"), os.path.join(tmp, "g")
+            os.makedirs(hd)
+            os.makedirs(gd)
+            host = relay.Relay("host", hd, None, 0, net.link(1, [2]),
+                               settings={"coopenemyhealth": "150", "pvp": "Off"}, version="1.3.0")
+            guest = relay.Relay("client", gd, None, 0, net.link(2, [1], peer=1),
+                                settings={"coopenemyhealth": "200", "pvp": "off"}, version="1.3.0")
+            for _ in range(30):
+                host.tick(time.monotonic())
+                guest.tick(time.monotonic())
+                time.sleep(0.01)
+            self.assertEqual(host.mismatch, ["coopenemyhealth"])
+            self.assertIn("mismatch=coopenemyhealth", host.status(time.monotonic()))
+            self.assertEqual(host.partner_version, "1.3.0")
+            # A partner's values can't inject keys or lines into net_status.txt.
+            net.inbox[1].append((2, json_bytes({"v": 2, "t": "hello", "ver": "1 time=999\nconnected=yes",
+                                                "cfg": {"pvp": "on connected=yes"}})))
+            host.receive_all(time.monotonic())
+            status = host.status(time.monotonic())
+            self.assertEqual(status.count("connected="), 1)
+            self.assertNotIn("\n", status)
+            self.assertNotIn("time=999", status)
+
+    def test_snapshot_goes_out_as_soon_as_the_mod_writes_it(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            r = relay.Relay("client", tmp, None, 0, net.link(2, [], peer=1))
+            r.wait(0.02)                             # takes the current files as already sent
+            net.inbox[1] = []
+            write(os.path.join(tmp, "net_out.txt"), "P 5 1 2 3 0 0 850 850 M\n")
+            r.wait(0.05)                             # no tick() in between: only the file watch can send it
+            sent = [d for _, d in net.inbox.get(1, []) if b"P 5 1 2 3" in d]
+            self.assertTrue(sent, "the new snapshot wasn't sent before the next tick")
+
+
+def json_bytes(obj):
+    import json
+    return json.dumps(obj).encode()
+
+
+class SecretLoopback(RelayLoopback):
+    """Two real relay processes with a Secret in each player's PhantomPact.ini."""
+
+    def start_pair(self, host_secret, guest_secret):
+        write(os.path.join(self.a, "PhantomPact.ini"), f"Role = Host\nSecret = {host_secret}\n")
+        write(os.path.join(self.b, "PhantomPact.ini"), f"Role = Guest\nSecret = {guest_secret}\n")
+        write(os.path.join(self.a, "net_out.txt"), "P 1 10.0 20.0 30.0 90.0 0 0\n")
+        write(os.path.join(self.b, "net_out.txt"), "P 7 -1.0 -2.0 -3.0 0.0 0 0\n")
+        self.start("host", "--dir", self.a, "--port", str(PORT + 3), "--ini", os.path.join(self.a, "PhantomPact.ini"))
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT + 3),
+                   "--ini", os.path.join(self.b, "PhantomPact.ini"))
+
+    def test_same_secret_connects(self):
+        self.start_pair("correct horse battery", "correct horse battery")
+        self.assertTrue(wait_for(lambda: read(os.path.join(self.b, "net_in.txt")).startswith("P 1")))
+        self.assertTrue(wait_for(lambda: "auth=on" in read(os.path.join(self.a, "net_status.txt"))))
+
+    def test_different_secrets_never_connect(self):
+        self.start_pair("correct horse battery", "something else")
+        self.assertTrue(wait_for(lambda: "rejected=" in read(os.path.join(self.a, "net_status.txt"))
+                                 and "rejected=0 " not in read(os.path.join(self.a, "net_status.txt"))))
+        self.assertEqual(read(os.path.join(self.b, "net_in.txt")), "")
+
+    # The plain loopback tests don't apply to this class.
+    test_snapshot_and_events_both_ways = None
+    test_receiving_relay_restart_resends_events = None
+    test_echo_shifts_player_only_and_echoes_events = None
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -98,6 +98,32 @@ real respawn:
   270 at level 10), and the scenario test checks that the client's kill pays both players the same amount.
 - whether a boss killed by reported damage counts as beaten for the host's save
 
+## Who may talk to the relay
+
+Raised by appdoze (issue #1 / PR #2) and reworked from their code:
+
+- **Sender filter.** The host relay only takes packets from addresses a partner can have: Tailscale, home networks,
+  this PC, and Hamachi/Radmin. `--allow any` lifts the filter. A guest only listens to its host's exact address
+  and port. Refused packets count as `filtered=` in net_status.txt.
+- **Optional `Secret`**, the same on both PCs. Every packet is HMAC-signed with a scrypt-stretched key, and the
+  relay refuses a packet when:
+  - it is unsigned, or its signature is wrong;
+  - it comes from its own role or session (bounced back at its sender);
+  - it is more than two minutes old or ahead;
+  - its counter isn't newer than the last one from that session (a replay).
+
+  Without a secret, signed packets are refused too, so a mismatch never half-works. Refused packets count as
+  `rejected=`. The relay reads the secret from the ini itself; it never appears on a command line.
+- **Event values.** NaN and infinity are dropped. Dust and damage are capped per event, and the cap is checked
+  before the lethal flag turns a hit into `math.huge`.
+- **One bad packet can't kill the relay.** Odd event ids, a huge ping timestamp, and floods are all handled: at
+  most 256 packets are read per receive.
+- **Settings handshake.** Each relay tells the other its mod version and the settings both should share. Any
+  difference shows as `mismatch=` and as an in-game tip. The partner's values are cleaned before they go into the
+  status line.
+- **`eval`** in cmd.txt runs only with dev.txt or `PBZCOOP_DEBUG=1`. The developer install creates dev.txt, and
+  the release zip has none.
+
 ## Executions and late joins
 
 - **Executions** (`GA_SimpleExecution_Young` and the other execution abilities) aren't sent as moves. Only

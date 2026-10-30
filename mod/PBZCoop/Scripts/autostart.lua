@@ -14,6 +14,28 @@ return function(api)
     local RELAY_FRESH_S = 5       -- a relay status this recent means a relay is already running
     local placeholder = "PUT-THE-HOSTS-TAILSCALE-IP-HERE"
 
+    -- Game builds this version was tested on, by PBZ.exe size (instant to read; hashing a 500 MB exe isn't).
+    -- Another build still runs, with a warning: function and field names may have changed. (From appdoze's PR #2.)
+    local KNOWN_BUILDS = {
+        [511072344] = "Steam build 26266538",
+    }
+    pcall(function()
+        local f = io.open(modRoot() .. "../../../PBZ.exe", "rb")
+        if not f then
+            return
+        end
+        local size = f:seek("end")
+        f:close()
+        if KNOWN_BUILDS[size] then
+            log("Game build: " .. KNOWN_BUILDS[size] .. " (tested).")
+        else
+            api.gameBuildWarning = "this game update isn't tested with this Phantom Pact version; some co-op "
+                .. "features may fail."
+            log("WARNING: this game build (PBZ.exe " .. tostring(size) .. " bytes) wasn't tested with Phantom Pact "
+                .. tostring(api.version) .. ". Co-op may partly fail; check for a Phantom Pact update.")
+        end
+    end)
+
     local function readText(path)
         local f = io.open(path, "r")
         if not f then
@@ -100,8 +122,10 @@ return function(api)
             return false
         end
         f:close()
-        local args = string.format('-I "%s" %s --dir "%s" --port %d --alive-file "%s"', relay,
-            modRole, modDir(), port, alivePath)
+        -- --ini: the relay reads the Secret (if any) and the settings both players should share from the ini
+        -- itself, so the secret never appears on a command line.
+        local args = string.format('-I "%s" %s --dir "%s" --port %d --alive-file "%s" --ini "%s" --mod-version %s',
+            relay, modRole, modDir(), port, alivePath, modDir() .. "PhantomPact.ini", api.version or "?")
         if steam then
             args = args .. ' --transport steam'
         end
@@ -120,7 +144,10 @@ return function(api)
         local joining = modRole ~= "client" and ""
             or hostAddress ~= "" and (", joining " .. hostAddress)
             or ", looking for a Steam friend who's hosting"
-        log("Relay started as " .. role .. joining .. (steam and " over Steam." or (" on UDP " .. port .. ".")))
+        local secret = settings.secret or ""
+        local signed = secret ~= "" and not secret:upper():find("^PUT%-") and secret:lower() ~= "off"
+        log("Relay started as " .. role .. joining .. (steam and " over Steam" or (" on UDP " .. port))
+            .. (signed and ", packets signed (Secret set)." or "."))
         return true
     end
 

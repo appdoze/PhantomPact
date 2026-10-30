@@ -433,10 +433,12 @@ local api = {
     modDir = modDir,
     modRoot = modRoot,
     spawnBesidePlayer1 = spawnBesidePlayer1,
+    version = VERSION,
 }
 api.game = dofile(SCRIPT_DIR .. "pbz.lua")(api)
 local coop = dofile(SCRIPT_DIR .. "coop.lua")(api)
 api.coop = coop
+api.status = dofile(SCRIPT_DIR .. "status.lua")(api)
 api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
 api.scaling = dofile(SCRIPT_DIR .. "scaling.lua")(api)
 local net = coop.net
@@ -488,6 +490,7 @@ for name, fn in pairs(api.game.commands or {}) do
 end
 COMMANDS.pvp = api.pvp.command
 COMMANDS.scale = api.scaling.command
+COMMANDS.tips = api.status.command
 
 local function readCommandFile()
     local path = modDir() .. "cmd.txt"
@@ -512,6 +515,17 @@ local function runCommand(line)
     end
     log("> " .. line)
     if name == "eval" then
+        -- Running any Lua from cmd.txt is for development only: any program on the PC can write that file.
+        -- Enabled by PBZCOOP_DEBUG=1 or a dev.txt next to the mod (tools\install-mod.ps1 creates it; the release
+        -- zip never has one). (From appdoze's PR #2.)
+        local devFile = io.open(modRoot() .. "dev.txt", "r")
+        if devFile then
+            devFile:close()
+        end
+        if not (DEV_KEYS or devFile) then
+            log("eval is off (development only): create dev.txt in the mod folder to enable it.")
+            return
+        end
         local chunk, err = load(rest, "eval", "t")
         if not chunk then
             log("eval compile error: " .. tostring(err))
