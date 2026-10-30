@@ -61,8 +61,20 @@ return function(api)
     end
     local port = tonumber(settings.port) or 47800
     local hostAddress = settings.hostaddress or ""
-    if modRole == "client" and (hostAddress == "" or hostAddress == placeholder or not hostAddress:match("^[%w%.%-:]+$")) then
-        log("PhantomPact.ini: Role = Guest but HostAddress isn't set. Put the host's Tailscale IP there and restart the game.")
+    -- Network: Tailscale (default), Direct (port forwarding, needs a Secret) or Steam (Steam's own networking).
+    local network = (settings.network or "tailscale"):lower()
+    if network ~= "tailscale" and network ~= "direct" and network ~= "steam" then
+        log("PhantomPact.ini: Network = " .. tostring(settings.network) .. " isn't Tailscale, Direct or Steam; using Tailscale.")
+        network = "tailscale"
+    end
+    local partner = settings.partnersteamid or ""
+    if network == "steam" and not partner:match("^7656119%d+$") then
+        log("PhantomPact.ini: Network = Steam needs PartnerSteamID (your partner's SteamID64, 7656119...). Co-op is off.")
+        return
+    end
+    if network ~= "steam" and modRole == "client"
+        and (hostAddress == "" or hostAddress == placeholder or not hostAddress:match("^[%w%.%-:]+$")) then
+        log("PhantomPact.ini: Role = Guest but HostAddress isn't set. Put the host's IP there and restart the game.")
         return
     end
 
@@ -89,8 +101,20 @@ return function(api)
         f:close()
         local args = string.format('-I "%s" %s --dir "%s" --port %d --alive-file "%s"', relay,
             modRole, modDir(), port, alivePath)
-        if modRole == "client" then
-            args = args .. ' --peer ' .. hostAddress
+        if network == "steam" then
+            -- The game's own steam_api64.dll sits next to PBZ.exe, three folders above ue4ss\Mods\PBZCoop.
+            args = args .. string.format(' --transport steam --partner %s --steam-dll "%s"', partner,
+                modRoot() .. "../../../steam_api64.dll")
+        else
+            if modRole == "client" then
+                args = args .. ' --peer ' .. hostAddress
+            end
+            if network == "direct" then
+                args = args .. ' --allow any'
+                if modRole == "host" and (settings.upnp or "on"):lower() ~= "off" then
+                    args = args .. ' --upnp'
+                end
+            end
         end
         -- pyw/pythonw: Python without a console window. The py launcher comes with python.org installs; plain
         -- pythonw covers the rest. "start" returns at once, so the game doesn't wait.

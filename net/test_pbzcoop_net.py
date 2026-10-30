@@ -282,6 +282,92 @@ class SecureLoopback(RelayLoopback):
         self.assertEqual(read(os.path.join(self.b, "net_in.txt")), "")
 
 
+class Direct(unittest.TestCase):
+    """Direct (port forwarding): open to any address, so a secret is required; UPnP asks the router for the
+    forward. The router here is a fake on 127.0.0.1 that records the SOAP actions."""
+
+    def test_direct_refuses_to_start_without_a_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = subprocess.run([sys.executable, "-I", RELAY, "host", "--dir", tmp, "--port", str(PORT), "--allow", "any",
+                                "--seconds", "1"], capture_output=True, text=True, timeout=20)
+            self.assertEqual(p.returncode, 2)
+            self.assertIn("error=direct-needs-secret", read(os.path.join(tmp, "net_status.txt")))
+
+    def test_ssdp_reply_location(self):
+        reply = b"HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLocation: http://192.168.1.1:5000/rootDesc.xml\r\n\r\n"
+        self.assertEqual(pbzcoop_net.ssdp_location(reply), "http://192.168.1.1:5000/rootDesc.xml")
+
+    def test_upnp_forward_is_added_and_removed(self):
+        import http.server
+        import threading
+        calls = []
+        desc = ('<?xml version="1.0"?><root xmlns="urn:schemas-upnp-org:device-1-0"><device><deviceList><device>'
+                '<deviceList><device><serviceList><service>'
+                '<serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>'
+                '<controlURL>/ctl/IPConn</controlURL></service></serviceList></device></deviceList>'
+                '</device></deviceList></device></root>')
+
+        class Router(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(desc.encode())
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"])).decode()
+                calls.append((self.headers["SOAPAction"].strip('"').split("#")[1], body))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"<s:Envelope><s:Body><NewExternalIPAddress>203.0.113.7</NewExternalIPAddress>"
+                                 b"</s:Body></s:Envelope>")
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Router)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                write(os.path.join(tmp, "PhantomPact.ini"), "Secret = s3cret\n")
+                url = f"http://127.0.0.1:{server.server_port}/rootDesc.xml"
+                p = subprocess.run([sys.executable, "-I", RELAY, "host", "--dir", tmp, "--port", str(PORT),
+                                    "--allow", "any", "--upnp", "--upnp-location", url, "--seconds", "1.5"],
+                                   capture_output=True, text=True, timeout=30)
+                self.assertIn("upnp=ok external_ip=203.0.113.7", p.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+        actions = [a for a, _ in calls]
+        self.assertEqual(actions[0], "AddPortMapping")
+        self.assertIn("GetExternalIPAddress", actions)
+        self.assertEqual(actions[-1], "DeletePortMapping", "the forward is removed when the relay stops")
+        add = calls[0][1]
+        for part in (f"<NewExternalPort>{PORT}</NewExternalPort>", "<NewProtocol>UDP</NewProtocol>",
+                     "<NewInternalClient>127.0.0.1</NewInternalClient>"):
+            self.assertIn(part, add)
+
+
+STEAM_DLL = os.environ.get("PBZ_STEAM_DLL", "")
+
+
+@unittest.skipUnless(STEAM_DLL, "set PBZ_STEAM_DLL to steam_api64.dll (Steam running) to test the Steam transport")
+class Steam(unittest.TestCase):
+    def test_steam_transport_starts_and_sends(self):
+        # Runs in a child process: SteamAPI_Init / Shutdown once per process.
+        code = ("import sys; sys.path.insert(0, %r); import pbzcoop_net as n; "
+                "t = n.SteamTransport(%r, 76561197960265728); print('me', t.my_id); "
+                "import time\n"
+                "for _ in range(10):\n"
+                "    t.send(b'hello', t.peer); t.poll(); time.sleep(0.05)\n"
+                "    if t.last_result == 1: break\n"
+                "print('send', t.last_result); t.close()") % (HERE, STEAM_DLL)
+        p = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        me = int(p.stdout.split("me ", 1)[1].split()[0])
+        self.assertTrue(str(me).startswith("7656119"), me)
+        self.assertIn("send 1", p.stdout, "k_EResultOK from SendMessageToUser")
+
+
 class Latency(RelayLoopback):
     def test_new_snapshots_go_out_immediately(self):
         a_out, b_in = os.path.join(self.a, "net_out.txt"), os.path.join(self.b, "net_in.txt")

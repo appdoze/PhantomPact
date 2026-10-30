@@ -234,17 +234,12 @@ class EventInbox:
         return self.last_id
 
 
-class Relay:
-    def __init__(self, role, folder, peer, port, secret="", allow="tailscale"):
-        self.role = role
-        self.auth = Auth(secret)
-        self.allowed = ALLOWED_NETWORKS[allow]
-        self.filtered = 0                 # packets dropped because of their sender address
-        self.out_path = os.path.join(folder, "net_out.txt")
-        self.in_path = os.path.join(folder, "net_in.txt")
-        self.events_out_path = os.path.join(folder, "net_events_out.txt")
-        self.status_path = os.path.join(folder, "net_status.txt")
-        self.inbox = EventInbox(os.path.join(folder, "net_events_in.txt"))
+class UdpTransport:
+    """Plain UDP: Tailscale (default) or Direct (port forwarding)."""
+
+    name = "udp"
+
+    def __init__(self, role, peer, port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
         if role == "host":
@@ -254,6 +249,259 @@ class Relay:
             self.sock.bind(("0.0.0.0", 0))
             # Resolved once: replies are only accepted from exactly this address and port.
             self.peer = (socket.gethostbyname(peer), port)
+
+    def fileno(self):
+        return self.sock
+
+    def send(self, data, peer):
+        self.sock.sendto(data, peer)
+
+    def receive(self):
+        while True:
+            try:
+                yield self.sock.recvfrom(65535)
+            except BlockingIOError:
+                return
+            except ConnectionResetError:
+                # Windows reports ICMP "port unreachable" this way while the peer isn't running yet.
+                continue
+
+    def poll(self):
+        pass
+
+    def close(self):
+        self.sock.close()
+
+
+# ---------------------------------------------------------------------------------------------------------- UPnP
+
+SSDP_ADDR = ("239.255.255.250", 1900)
+WAN_SERVICES = ("urn:schemas-upnp-org:service:WANIPConnection:2", "urn:schemas-upnp-org:service:WANIPConnection:1",
+                "urn:schemas-upnp-org:service:WANPPPConnection:1")
+
+
+def ssdp_location(response):
+    """LOCATION header of an SSDP reply, or None."""
+    for line in response.decode("latin-1").split("\r\n"):
+        key, sep, value = line.partition(":")
+        if sep and key.strip().lower() == "location":
+            return value.strip()
+    return None
+
+
+def upnp_discover(timeout=2.0):
+    """URL of the router's (Internet Gateway Device) description, found by SSDP multicast, or None."""
+    msg = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n"
+           "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n").encode()
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(timeout)
+    try:
+        s.sendto(msg, SSDP_ADDR)
+        while True:
+            data, _ = s.recvfrom(4096)
+            loc = ssdp_location(data)
+            if loc:
+                return loc
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def upnp_control(location, timeout=3.0):
+    """(control URL, service type) of the router's WAN connection service, from its description XML."""
+    import urllib.parse
+    import urllib.request
+    import xml.etree.ElementTree as ET
+    with urllib.request.urlopen(location, timeout=timeout) as r:
+        root = ET.fromstring(r.read())
+    ns = {"d": "urn:schemas-upnp-org:device-1-0"}
+    base = root.findtext("d:URLBase", default="", namespaces=ns) or location
+    for svc in root.iter("{urn:schemas-upnp-org:device-1-0}service"):
+        stype = svc.findtext("d:serviceType", default="", namespaces=ns)
+        if stype in WAN_SERVICES:
+            return urllib.parse.urljoin(base, svc.findtext("d:controlURL", default="", namespaces=ns)), stype
+    raise OSError("router has no WAN IP/PPP connection service")
+
+
+def upnp_call(control, stype, action, args, timeout=3.0):
+    """One SOAP action; returns the response body (raises OSError on an HTTP error)."""
+    import urllib.request
+    from xml.sax.saxutils import escape
+    body = "".join(f"<{k}>{escape(str(v))}</{k}>" for k, v in args)
+    envelope = ('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+                's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+                f'<u:{action} xmlns:u="{stype}">{body}</u:{action}></s:Body></s:Envelope>').encode()
+    req = urllib.request.Request(control, data=envelope, method="POST", headers={
+        "Content-Type": 'text/xml; charset="utf-8"', "SOAPAction": f'"{stype}#{action}"'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def local_ip_toward(host):
+    """This PC's address on the interface that reaches host (no packet is sent)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((host, 1900))
+        return s.getsockname()[0]
+    finally:
+        s.close()
+
+
+class PortMapping:
+    """Asks the router to forward UDP <port> to this PC (UPnP IGD) and removes the mapping on close."""
+
+    LEASE_S = 3600          # renewed while the relay runs; a crashed relay's mapping expires on its own
+    DESCRIPTION = "Phantom Pact co-op"
+
+    def __init__(self, port, location=None):
+        import urllib.parse
+        self.port = port
+        self.location = location or upnp_discover()
+        if not self.location:
+            raise OSError("no UPnP router answered (UPnP off on the router?)")
+        self.control, self.stype = upnp_control(self.location)
+        self.client = local_ip_toward(urllib.parse.urlparse(self.control).hostname)
+        self.external_ip = ""
+        self.renewed = 0.0
+        self.renew(time.monotonic())
+        try:
+            reply = upnp_call(self.control, self.stype, "GetExternalIPAddress", [])
+            self.external_ip = reply.split("<NewExternalIPAddress>", 1)[1].split("<", 1)[0]
+        except (OSError, IndexError):
+            pass
+
+    def renew(self, now):
+        upnp_call(self.control, self.stype, "AddPortMapping", [
+            ("NewRemoteHost", ""), ("NewExternalPort", self.port), ("NewProtocol", "UDP"),
+            ("NewInternalPort", self.port), ("NewInternalClient", self.client), ("NewEnabled", 1),
+            ("NewPortMappingDescription", self.DESCRIPTION), ("NewLeaseDuration", self.LEASE_S)])
+        self.renewed = now
+
+    def keep_alive(self, now):
+        if now - self.renewed >= self.LEASE_S / 2:
+            try:
+                self.renew(now)
+            except OSError:
+                pass
+
+    def close(self):
+        try:
+            upnp_call(self.control, self.stype, "DeletePortMapping", [
+                ("NewRemoteHost", ""), ("NewExternalPort", self.port), ("NewProtocol", "UDP")])
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------------------------------------- Steam
+
+STEAM_APP_ID = 4115450      # Phantom Blade Zero
+STEAM_CHANNEL = 47800       # Steam Networking Messages channel for Phantom Pact
+SEND_NO_NAGLE = 1           # k_nSteamNetworkingSend_NoNagle (unreliable): snapshots and events are resent anyway
+SEND_AUTO_RESTART = 32      # k_nSteamNetworkingSend_AutoRestartBrokenSession
+IDENTITY_BYTES = 136        # sizeof(SteamNetworkingIdentity)
+IDENTITY_STEAMID = 16       # k_ESteamNetworkingIdentityType_SteamID
+
+
+class SteamTransport:
+    """Steam Networking Messages through the game's steam_api64.dll: peer-to-peer with NAT traversal and Valve's
+    relay network (SDR) as fallback, encrypted and authenticated by Steam. No VPN, no port forwarding, no IP
+    address: each player sets the other's SteamID64. Steam must be running and signed in."""
+
+    name = "steam"
+
+    def __init__(self, dll_path, partner_id):
+        import ctypes
+        from ctypes import c_bool, c_char_p, c_int, c_int64, c_uint32, c_uint64, c_void_p, POINTER
+        self.ct = ctypes
+        os.environ.setdefault("SteamAppId", str(STEAM_APP_ID))
+        os.environ.setdefault("SteamGameId", str(STEAM_APP_ID))
+        if os.path.isdir(dll_path):
+            dll_path = os.path.join(dll_path, "steam_api64.dll")
+        self.api = api = ctypes.CDLL(dll_path)
+        api.SteamAPI_InitFlat.argtypes = [c_char_p]
+        api.SteamAPI_InitFlat.restype = c_int
+        err = ctypes.create_string_buffer(1024)
+        result = api.SteamAPI_InitFlat(err)
+        if result != 0:
+            raise OSError(f"SteamAPI init failed ({result}): {err.value.decode(errors='replace')}")
+        for fn, res, args in [
+            ("SteamAPI_SteamUser_v023", c_void_p, []),
+            ("SteamAPI_ISteamUser_GetSteamID", c_uint64, [c_void_p]),
+            ("SteamAPI_SteamNetworkingUtils_SteamAPI_v004", c_void_p, []),
+            ("SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess", None, [c_void_p]),
+            ("SteamAPI_SteamNetworkingMessages_SteamAPI_v002", c_void_p, []),
+            ("SteamAPI_SteamNetworkingIdentity_SetSteamID64", None, [c_void_p, c_uint64]),
+            ("SteamAPI_ISteamNetworkingMessages_SendMessageToUser", c_int,
+             [c_void_p, c_void_p, c_void_p, c_uint32, c_int, c_int]),
+            ("SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser", c_bool, [c_void_p, c_void_p]),
+            ("SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel", c_int,
+             [c_void_p, c_int, POINTER(c_void_p), c_int]),
+            ("SteamAPI_SteamNetworkingMessage_t_Release", None, [c_void_p]),
+            ("SteamAPI_RunCallbacks", None, []),
+            ("SteamAPI_Shutdown", None, []),
+        ]:
+            f = getattr(api, fn)
+            f.restype, f.argtypes = res, args
+        self.my_id = api.SteamAPI_ISteamUser_GetSteamID(api.SteamAPI_SteamUser_v023())
+        api.SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(api.SteamAPI_SteamNetworkingUtils_SteamAPI_v004())
+        self.msgs = api.SteamAPI_SteamNetworkingMessages_SteamAPI_v002()
+        self.partner = int(partner_id)
+        self.identity = ctypes.create_string_buffer(IDENTITY_BYTES)
+        api.SteamAPI_SteamNetworkingIdentity_SetSteamID64(self.identity, self.partner)
+        # Sending to the partner accepts their session too; accept explicitly as well in case they spoke first.
+        api.SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser(self.msgs, self.identity)
+        self.peer = ("steam", self.partner)
+        self.out = (c_void_p * 64)()
+        self.last_result = None
+
+    def fileno(self):
+        return None
+
+    def send(self, data, peer):
+        buf = self.ct.create_string_buffer(data, len(data))
+        self.last_result = self.api.SteamAPI_ISteamNetworkingMessages_SendMessageToUser(
+            self.msgs, self.identity, buf, len(data), SEND_NO_NAGLE | SEND_AUTO_RESTART, STEAM_CHANNEL)
+
+    def receive(self):
+        ct = self.ct
+        n = self.api.SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel(self.msgs, STEAM_CHANNEL, self.out, 64)
+        for i in range(n):
+            m = self.out[i]
+            # SteamNetworkingMessage_t: void *m_pData; int m_cbSize; HSteamNetConnection m_conn;
+            # SteamNetworkingIdentity m_identityPeer { int m_eType; int m_cbSize; uint64 m_steamID64; ... }
+            data_ptr = ct.c_void_p.from_address(m).value
+            size = ct.c_int.from_address(m + 8).value
+            id_type = ct.c_int.from_address(m + 16).value
+            sender = ct.c_uint64.from_address(m + 24).value if id_type == IDENTITY_STEAMID else 0
+            data = ct.string_at(data_ptr, size) if data_ptr and size > 0 else b""
+            self.api.SteamAPI_SteamNetworkingMessage_t_Release(m)
+            yield data, ("steam", sender)
+
+    def poll(self):
+        self.api.SteamAPI_RunCallbacks()
+
+    def close(self):
+        # No SteamAPI_Shutdown: called while the networking thread is still flushing it sometimes ends the process
+        # with an error ("Writing to pipe we closed locally"), and the relay only closes when it exits anyway;
+        # Steam releases the session when the process ends.
+        pass
+
+
+class Relay:
+    def __init__(self, role, folder, peer, port, secret="", allow="tailscale", transport=None):
+        self.role = role
+        self.auth = Auth(secret)
+        self.allowed = ALLOWED_NETWORKS[allow]
+        self.filtered = 0                 # packets dropped because of their sender address
+        self.out_path = os.path.join(folder, "net_out.txt")
+        self.in_path = os.path.join(folder, "net_in.txt")
+        self.events_out_path = os.path.join(folder, "net_events_out.txt")
+        self.status_path = os.path.join(folder, "net_status.txt")
+        self.inbox = EventInbox(os.path.join(folder, "net_events_in.txt"))
+        self.transport = transport or UdpTransport(role, peer, port)
+        self.peer = self.transport.peer
+        self.extra_status = ""            # transport details for net_status.txt (UPnP, Steam ids)
         self.last_heard = 0.0
         self.last_out_sig = None          # (mtime, size) of net_out.txt / net_events_out.txt when last sent
         self.last_sent_at = 0.0
@@ -270,22 +518,20 @@ class Relay:
             return
         msg["v"] = PROTOCOL
         try:
-            self.sock.sendto(self.auth.seal(msg), self.peer)
+            self.transport.send(self.auth.seal(msg), self.peer)
             self.sent += 1
         except OSError:
             pass
 
     def receive_all(self, now):
-        while True:
-            try:
-                data, addr = self.sock.recvfrom(65535)
-            except BlockingIOError:
-                return
-            except ConnectionResetError:
-                # Windows reports ICMP "port unreachable" this way while the peer isn't running yet.
-                continue
-            # The client only listens to the host it was given; the host only to allowed networks.
-            if (self.role != "host" and addr != self.peer) or not address_allowed(addr, self.allowed):
+        for data, addr in self.transport.receive():
+            # The client only listens to the host it was given; the host only to allowed networks. Over Steam the
+            # sender is the authenticated SteamID and only the configured partner is accepted.
+            if self.transport.name == "steam":
+                if addr != self.peer:
+                    self.filtered += 1
+                    continue
+            elif (self.role != "host" and addr != self.peer) or not address_allowed(addr, self.allowed):
                 self.filtered += 1
                 continue
             msg = self.auth.open(data)
@@ -337,7 +583,14 @@ class Relay:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
-            ready, _, _ = select.select([self.sock], [], [], min(remaining, WATCH))
+            sock = self.transport.fileno()
+            if sock is not None:
+                ready, _, _ = select.select([sock], [], [], min(remaining, WATCH))
+            else:
+                # Steam delivers messages to a queue we poll; there is no socket to wait on.
+                time.sleep(min(remaining, WATCH))
+                self.transport.poll()
+                ready = True
             now = time.monotonic()
             if ready:
                 self.receive_all(now)
@@ -384,7 +637,7 @@ class Relay:
                 f"rtt_ms={rtt} sent={self.sent} received={self.received} "
                 f"events_acked={self.events_acked} events_in={self.inbox.last_id} "
                 f"auth={'on' if self.auth.key else 'off'} rejected={self.auth.rejected} filtered={self.filtered} "
-                f"time={int(time.time())}")
+                f"{self.extra_status + ' ' if self.extra_status else ''}time={int(time.time())}")
 
 
 ECHO_OFFSET_X = 300.0   # cm
@@ -561,9 +814,18 @@ def main():
     ap.add_argument("--allow", choices=sorted(ALLOWED_NETWORKS), default="tailscale",
                     help="who may connect: tailscale (100.64.0.0/10 and this PC, default) or any")
     ap.add_argument("--secret-file", help="file holding the shared secret (default: Secret in <dir>/PhantomPact.ini)")
+    ap.add_argument("--insecure", action="store_true", help="allow --allow any without a secret (not recommended)")
+    ap.add_argument("--upnp", action="store_true", help="host, Direct: ask the router to forward the port (UPnP)")
+    ap.add_argument("--upnp-location", help=argparse.SUPPRESS)   # tests: a fake router's description URL
+    ap.add_argument("--transport", choices=["udp", "steam"], default="udp",
+                    help="udp (Tailscale or Direct) or steam (Steam Networking Messages)")
+    ap.add_argument("--partner", help="steam: the other player's SteamID64")
+    ap.add_argument("--steam-dll", help="steam: steam_api64.dll (or the game folder that holds it)")
     args = ap.parse_args()
-    if args.role == "client" and not args.peer:
+    if args.role == "client" and args.transport == "udp" and not args.peer:
         ap.error("client needs --peer <host IP>")
+    if args.transport == "steam" and not (args.partner and args.partner.isdigit() and args.steam_dll):
+        ap.error("steam needs --partner <SteamID64> and --steam-dll <path>")
     os.makedirs(args.dir, exist_ok=True)
     if args.role == "echo":
         run_echo(args.dir, args.seconds)
@@ -578,10 +840,34 @@ def main():
         return
 
     fine_timer()
+    status_path = os.path.join(args.dir, "net_status.txt")
     secret = read_secret(args.dir, args.secret_file)
-    relay = Relay(args.role, args.dir, args.peer, args.port, secret=secret, allow=args.allow)
-    print(f"PBZCoop relay {args.role} on UDP {args.port}, files in {args.dir}, "
-          f"auth {'on' if secret else 'off (set Secret in PhantomPact.ini)'}, allow {args.allow}", flush=True)
+    if args.transport == "udp" and args.allow == "any" and not secret and not args.insecure:
+        # An open port without signing would let anyone who finds it join or send events.
+        write_atomic(status_path, f"role={args.role} connected=no error=direct-needs-secret time={int(time.time())}\n")
+        print("Direct needs a Secret: set the same Secret in PhantomPact.ini on both PCs", flush=True)
+        raise SystemExit(2)
+    transport, mapping = None, None
+    if args.transport == "steam":
+        try:
+            transport = SteamTransport(args.steam_dll, args.partner)
+        except OSError as e:
+            write_atomic(status_path, f"role={args.role} connected=no error=steam-init time={int(time.time())}\n")
+            print(f"Steam networking unavailable: {e}", flush=True)
+            raise SystemExit(3)
+    relay = Relay(args.role, args.dir, args.peer, args.port, secret=secret, allow=args.allow, transport=transport)
+    if transport is not None:
+        relay.extra_status = f"transport=steam me={transport.my_id} partner={transport.partner}"
+    if args.upnp and args.role == "host" and args.transport == "udp":
+        try:
+            mapping = PortMapping(args.port, args.upnp_location)
+            relay.extra_status = f"upnp=ok external_ip={mapping.external_ip or '?'}"
+        except (OSError, ValueError) as e:
+            relay.extra_status = "upnp=failed"
+            print(f"UPnP port forwarding failed ({e}); forward UDP {args.port} on the router by hand", flush=True)
+    print(f"PBZCoop relay {args.role} over {args.transport} (port {args.port}), files in {args.dir}, "
+          f"auth {'on' if secret else 'off (set Secret in PhantomPact.ini)'}, allow {args.allow} "
+          f"{relay.extra_status}", flush=True)
     start = time.monotonic()
     last_status = 0.0
     try:
@@ -598,10 +884,15 @@ def main():
             if args.alive_file and not game_alive(args.alive_file, args.alive_timeout):
                 print("the game's heartbeat stopped: game closed, relay exiting", flush=True)
                 break
+            if mapping:
+                mapping.keep_alive(now)
             relay.wait(TICK)
     except KeyboardInterrupt:
         pass
     finally:
+        if mapping:
+            mapping.close()
+        relay.transport.close()
         write_atomic(relay.status_path, f"role={args.role} connected=no stopped=yes\n")
 
 
