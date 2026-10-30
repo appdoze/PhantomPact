@@ -211,7 +211,7 @@ return function(api)
                         tonumber(settings.coopenemyposture) or 130))
                 end
                 if api.sync then
-                    api.sync.codex = (settings.sharecodex or "off"):lower() == "on"
+                    api.sync.codex = (settings.sharecodex or "on"):lower() ~= "off"
                     api.sync.set((settings.shareprogress or "on"):lower() ~= "off")
                 end
                 if (settings.pvp or ""):lower() == "on" and api.pvp then

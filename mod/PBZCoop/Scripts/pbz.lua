@@ -898,6 +898,12 @@ return function(api)
         return n
     end
 
+    -- In a cutscene (the game's own level-sequence manager; checked in game).
+    function game.inCutscene()
+        local ok, playing = pcall(function() return FindFirstOf("PBZLevelSequenceManager"):IsInSequence() end)
+        return ok and playing == true
+    end
+
     -- Short name of the current map, so a ghost from another map isn't shown in this one.
     function game.mapName(contextActor)
         local ok, name = pcall(function() return api.gs():GetCurrentLevelName(contextActor, true):ToString() end)

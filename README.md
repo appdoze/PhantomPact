@@ -21,10 +21,12 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 - Shared resting: rest at a bell and enemies respawn for both
 - Shared progress (`ShareProgress = On`): quests, bells, enemy-group rewards, challenge points (Banyan Heart,
   Dragon Pillar, Scarecrow), codex entries, opened chests and broken rubbish piles follow both players, applied
-  through the game's own functions; gates, doors and shortcuts your partner opens are recorded for your next load
+  through the game's own functions; new equipment either player gets (from chests or anywhere) goes to both;
+  gates, doors and shortcuts your partner opens are recorded for your next load
 - Regroup (F5): teleport next to your partner, also into their area, e.g. past a gate only they opened or after
   you respawn at a bell
-- Partner tips: your partner is down / back, their health getting low, you've drifted far apart
+- Partner tips: your partner is down / back, their health getting low, watching a cutscene (their ghost hides),
+  you've drifted far apart
 - Elden Ring–style co-op difficulty: enemies and bosses get more health and posture while you play together
 - PvP duels (`PvP = On`): the game's own block, parry and dodge; parries stagger the attacker; the loser dies
 - In-game status tips: partner connected or lost, settings that differ between the two PCs

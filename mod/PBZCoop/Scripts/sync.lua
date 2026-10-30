@@ -8,13 +8,17 @@
 --   N <node guid>          a challenge point (Banyan Heart, Dragon Pillar, Scarecrow) done: the event pipeline's
 --                          ExecuteNodeGuid record, the one the map's completion reads
 --   X <enemy class path>   a codex entry discovered: PBZCodexSubsystem.DiscoveredEnemyPaths (sending needs
---                          "ShareCodex = On": reading the codex list isn't verified in game yet; receiving is)
+--                          ShareCodex, on by default)
+--   J <store> <id>         new equipment, from a chest or anywhere: accessory (acc), medicine (med), weapon (weap) or
+--                          Phantom Edge weapon (edge); the partner gets it through the backpack's own
+--                          PushAccessoryToInventory / PushMedicineToInventory / AddWeaponItem (checked in game)
 --   A <Level>-<Actor>      a world object done: chest opened, rubbish pile broken, gate or door opened, shortcut
 --                          kicked down, blocked path broken, cage opened... (the game's LevelActorManager key)
 --
 -- World objects live in streamed-in levels, so the partner's are kept in a pending list and applied when that
 -- actor is loaded: a rubbish pile through its own BeginDestroyRubbish (which also records it), a chest through its
--- own "Change Switch State" (shown open). Gates, doors and shortcuts have no function verified in game yet, so
+-- own "Change Switch State" (shown open), a fog gate through its own OpenByMobScript (the call the mod already uses
+-- at boss arenas). Other gates, doors and shortcuts have no function verified in game yet, so
 -- they aren't changed in the running game (regroup gets you past one your partner opened). Every shared object
 -- goes to shared_world.txt; "pbzsave coop-sync" writes the game's own record for it into the save with the game
 -- closed, so it is open from the next load. Chests are shown open again each session until then. The contents of
@@ -41,7 +45,7 @@ return function(api)
         BP_Chest_C = { what = "chest", live = "chest" },
         BP_Rubbish_C = { what = "rubbish pile", live = "rubbish" },
         BP_Rubbish_b_C = { what = "rubbish pile" },
-        BP_FogDoor_C = { what = "fog gate" },
+        BP_FogDoor_C = { what = "fog gate", live = "fog" },
         BP_Block_Gate_C = { what = "gate" },
         BP_DoubleDoor_G_C = { what = "door" },
         BP_MoveableStuff_CollisionLandscape_door_C = { what = "door" },
@@ -57,7 +61,7 @@ return function(api)
         pending = {},               -- partner's chests / rubbish piles not applied yet: id -> true
         shown = {},                 -- chests shown open this session (their record waits for pbzsave coop-sync)
         ledgered = {},              -- ids already in shared_world.txt
-        codex = false,              -- send new codex entries (PhantomPact.ini ShareCodex)
+        codex = true,               -- send new codex entries (PhantomPact.ini ShareCodex)
         sent = 0,
         applied = 0,
         failed = 0,
@@ -146,6 +150,30 @@ return function(api)
         end
     end
 
+    -- Equipment stores of the backpack (owned item ids are the map keys) and how the backpack adds one.
+    local EQUIP = {
+        acc = { map = "Accessories", what = "accessory", add = function(bp, id) bp:PushAccessoryToInventory(FName(id), false) end },
+        med = { map = "MedicineInfos", what = "medicine", add = function(bp, id) bp:PushMedicineToInventory(FName(id), false, true) end },
+        weap = { map = "MainWeaponInfos", what = "weapon", add = function(bp, id) bp:AddWeaponItem(FName(id), true, true, false, false) end },
+        edge = { map = "ShaqiWeaponInfos", what = "Phantom Edge weapon", add = function(bp, id) bp:AddWeaponItem(FName(id), false, true, false, false) end },
+    }
+
+    local function backpack()
+        for _, o in ipairs(FindAllOf("PBZBackPackSubsystem") or {}) do
+            if valid(o) then
+                return o
+            end
+        end
+    end
+
+    local function owns(bp, store, id)
+        local found = false
+        bp[EQUIP[store].map]:ForEach(function(k)
+            found = found or k:get():ToString() == id
+        end)
+        return found
+    end
+
     local function worldName(pawn)
         local name
         pcall(function() name = pawn:GetWorld():GetFName():ToString() end)
@@ -153,7 +181,7 @@ return function(api)
     end
 
     local function scan()
-        local state = { quests = {}, bells = {}, mobs = {}, nodes = {}, codex = {}, actors = {} }
+        local state = { quests = {}, bells = {}, mobs = {}, nodes = {}, codex = {}, actors = {}, equip = {} }
         local nc = first("PBZNarrativeComponent")
         if nc then
             each(nc:GetAllQuests(), function(e)
@@ -176,12 +204,20 @@ return function(api)
                 end
             end
         end
-        local epm = first("PBZEventPipelineManager")
+        local epm = first("EventPipelineManager")
         if epm then
             for _, guid in ipairs(challengeNodes) do
                 if epm.ExecuteNodeGuid:Contains(guid) then
                     state.nodes[guid] = true
                 end
+            end
+        end
+        local bp = backpack()
+        if bp then
+            for store, prop in pairs(EQUIP) do
+                bp[prop.map]:ForEach(function(k)
+                    state.equip[store .. " " .. k:get():ToString()] = true
+                end)
             end
         end
         local cs = sync.codex and first("PBZCodexSubsystem")
@@ -240,6 +276,9 @@ return function(api)
                             a:BeginDestroyRubbish()
                         end
                         sync.pending[id] = nil
+                    elseif SHARED[cn].live == "fog" then
+                        a:OpenByMobScript()
+                        sync.shown[id] = true
                     else
                         if not a.CurSwitchState then
                             a["Change Switch State"]()
@@ -263,7 +302,7 @@ return function(api)
             sync.known = now
             return
         end
-        for kind, key in pairs({ quests = "Q", bells = "L", mobs = "G", nodes = "N", codex = "X", actors = "A" }) do
+        for kind, key in pairs({ quests = "Q", bells = "L", mobs = "G", nodes = "N", codex = "X", actors = "A", equip = "J" }) do
             for id in pairs(now[kind]) do
                 if not sync.known[kind][id] then
                     sync.known[kind][id] = true
@@ -358,7 +397,7 @@ return function(api)
             return
         end
         apply("challenge point", "nodes", guid, function()
-            local epm = first("PBZEventPipelineManager")
+            local epm = first("EventPipelineManager")
             if not epm then
                 error("no event pipeline")
             end
@@ -382,6 +421,29 @@ return function(api)
             -- A set: adding an entry that's already there changes nothing (checked in game).
             cs.DiscoveredEnemyPaths:Add({ AssetPath = { PackageName = FName(pkg), AssetName = FName(asset) },
                 SubPathString = "" })
+        end)
+    end
+
+    coop.handlers.J = function(rest)
+        local store, id = (rest or ""):match("^(%a+) ([%w_%.%-]+)$")
+        if not (store and EQUIP[store] and #id < 128) then
+            return
+        end
+        apply(EQUIP[store].what, "equip", store .. " " .. id, function()
+            local bp = backpack()
+            if not bp then
+                error("no backpack")
+            end
+            if not owns(bp, store, id) then
+                EQUIP[store].add(bp, id)
+                -- The backpack ignores ids it doesn't know (checked in game): only tell the player when it arrived.
+                if not owns(bp, store, id) then
+                    error("the backpack didn't take it")
+                end
+                if api.status and api.status.notify then
+                    api.status.notify("loot", "your partner found a " .. EQUIP[store].what .. ": you got it too.")
+                end
+            end
         end)
     end
 
@@ -432,8 +494,8 @@ return function(api)
             waiting = waiting + 1
         end
         log(string.format("Shared progress %s: sent %d, applied %d, failed %d, %d chest(s) / rubbish pile(s) waiting "
-            .. "for their area (quests, bells, enemy rewards, challenge points, codex, chests, rubbish piles, "
-            .. "gates, doors, shortcuts)",
+            .. "for their area (quests, bells, enemy rewards, challenge points, codex, equipment, chests, rubbish "
+            .. "piles, gates, doors, shortcuts)",
             sync.on and "on" or "off", sync.sent, sync.applied, sync.failed, waiting))
     end
 

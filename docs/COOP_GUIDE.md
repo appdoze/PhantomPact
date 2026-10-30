@@ -66,14 +66,21 @@ the client logic runs on the echoed data, so host and client code both run in on
 | Currency | Dust gained locally (not by sync) is sent as `C <amount>` and added on the other PC: shared rewards. Spending isn't mirrored | +40 earned, `C 40` sent, the other side added 40, no echo loop |
 | Boss arena fog walls | On `B` the other PC closes `BP_FogDoor_C` within 60 m of its copy of the boss; on that boss's `K` it opens them | Fog wall rose at the tutorial boss arena entrance and opened on the boss's death |
 
-| Shared progress (`sync.lua`) | Quests, bells, enemy-group rewards, challenge points, codex entries, chests, rubbish piles, gates, doors and shortcuts (`Q L G N X A` events). Chests and rubbish piles change live; gates, doors and shortcuts are written to `shared_world.txt` for `pbzsave coop-sync` (open from the next load) | Calls used ran in game; not yet in a live co-op session |
-| Regroup (`partner.lua`, F5) | `PerformanceSystemSubsystem.TeleportToTargetPoint` to 80 cm behind the partner, in their area (`P` line: position, yaw, map) | Teleport function used in game (area to area); regroup itself tested offline only |
+| Shared progress (`sync.lua`) | Quests, bells, enemy-group rewards, challenge points, codex entries, equipment, chests, rubbish piles, gates, doors and shortcuts (`Q L G N X J A` events). Chests, rubbish piles and fog gates change live; other gates, doors and shortcuts are written to `shared_world.txt` for `pbzsave coop-sync` (open from the next load) | sync.lua ran in game with a fake network: every scan (79 quests, 192 bells, 23 challenge points, 175 codex entries, 70 world objects, 150 equipment, 19-24 ms), no false events, every receive handler; not yet in a live co-op session |
+| Equipment (`J`) | New accessories, medicine, weapons, Phantom Edge weapons (backpack `Accessories` / `MedicineInfos` / `MainWeaponInfos` / `ShaqiWeaponInfos`) go to the partner through `PushAccessoryToInventory`, `PushMedicineToInventory`, `AddWeaponItem`; unknown ids are refused by the backpack and reported as failed | The three calls ran in game (owned ids: no duplicate; unknown id: nothing added) |
+| Partner in a cutscene | `P` line's last field (`PBZLevelSequenceManager.IsInSequence`); the ghost hides and a tip says so | IsInSequence read in game; hiding tested offline |
+| Regroup (`partner.lua`, F5) | `PerformanceSystemSubsystem.TeleportToTargetPoint` to 80 cm behind the partner, in their area (`P` line: position, yaw, map) | Same call with a hand-built transform: moved the player exactly 3 m in game, and from under the map to a bell in another area |
 | Partner tips (`partner.lua`) | From the `P` line's health: down (2 checks at 0), back, 50% / 25% health; 150 m apart; your own respawn | Offline (mod_logic tests) |
 
 Not synced: enemy AI targets in the client world are its own (positions/health are pulled to the host's);
-cutscenes; dialogue; chest contents (they stay with whoever opened it); gates, doors and shortcuts in the running
-game (recorded for the next load; regroup gets you past); lifts and other back-and-forth mechanisms; spending
-currency; time of day and weather. No revive: each player's death and respawn stay in their own game.
+cutscenes themselves and dialogue (each player watches their own; the partner's ghost hides meanwhile); gates,
+doors and shortcuts other than fog gates in the running game (recorded for the next load; regroup gets you past);
+lifts and other back-and-forth mechanisms; spending currency. No revive: each player's death and respawn stay in
+their own game.
+
+Not needed: time of day and weather. In game, "Animate Time Of Day" is off and random weather is off: each area
+has a fixed, designed time and weather (checked: 15:50, rain 0, snow 10, unchanged over time), so two players in
+the same area already see the same sky.
 
 Known limits found in testing:
 - Item ids are the `ItemId` field of `DT_InventoryData` rows (ASCII, e.g. `Weapon_Material_01`, `Item_001`,

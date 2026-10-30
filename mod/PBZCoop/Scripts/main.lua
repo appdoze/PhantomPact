@@ -6,7 +6,7 @@
 -- F8  spawn player 2: a second local player + a copy of player 1's character (F8-F11 need PBZCOOP_DEBUG=1)
 -- F9  remove player 2
 
-local VERSION = "1.4.0"
+local VERSION = "1.5.0"
 local TAG = "[PBZCoop] "
 if (os.getenv("PBZCOOP_INSTANCE") or "1") ~= "1" then
     TAG = "[PBZCoop#" .. os.getenv("PBZCOOP_INSTANCE") .. "] "

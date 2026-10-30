@@ -4,8 +4,9 @@
 -- partner with the game's own teleport (PerformanceSystemSubsystem.TeleportToTargetPoint, the one that takes you
 -- from one area to another), so it works across areas and gets you past a gate only your partner has opened.
 --
--- Tips (the game's ink-bar tip, see status.lua): partner down, partner back, partner's health getting low, the
--- two of you far apart, and after you respawn, a reminder that regroup takes you back. Each player's death and
+-- Tips (the game's ink-bar tip, see status.lua): partner down, partner back, partner's health getting low,
+-- partner watching a cutscene, the two of you far apart, and after you respawn, a reminder that regroup takes you
+-- back. Each player's death and
 -- respawn stay their own game's: there is no revive.
 
 return function(api)
@@ -30,6 +31,7 @@ return function(api)
         selfZero = 0,
         lowShown = 1,
         far = false,
+        partnerCine = false,
     }
     local ticks = 0
 
@@ -104,6 +106,12 @@ return function(api)
             return
         end
         partner.partnerZero = 0
+        if t.Cine ~= partner.partnerCine then
+            partner.partnerCine = t.Cine
+            if t.Cine then
+                tip("cine", "your partner is watching a cutscene.")
+            end
+        end
         local frac = t.Hp / t.MaxHp
         if partner.partnerDown then
             partner.partnerDown = false
