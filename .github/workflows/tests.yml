@@ -24,9 +24,9 @@ jobs:
       - run: python -I net/test_pbzcoop_net.py
 
   # Fork extras: the fork's Lua modules run against stand-ins for the game, and every mod script is compiled as
-  # Lua 5.4 (relay/tests). Rust comes preinstalled on GitHub's runners.
+  # Lua 5.4 (luatest/). Rust comes preinstalled on GitHub's runners.
   fork-lua:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - run: cargo test --release --manifest-path relay/Cargo.toml
+      - run: cargo test --release --manifest-path luatest/Cargo.toml

@@ -1,6 +1,6 @@
 -- Guest side: how a mirrored enemy follows the host's copy. A small drift glides back over a few updates instead
 -- of jumping (the enemy's own AI keeps animating it meanwhile); only a big gap (teleporting boss, respawn, a
--- streaming hitch) is still a jump. Pure function, so it's tested outside the game (relay/tests/mod_logic.rs).
+-- streaming hitch) is still a jump. Pure function, so it's tested outside the game (luatest/tests/mod_logic.rs).
 
 local GLIDE_FROM_CM = 150   -- closer than this: leave the enemy to its own AI
 local SNAP_FROM_CM = 2000   -- further than this: jump

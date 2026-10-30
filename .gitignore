@@ -11,5 +11,5 @@ art/screenshots/*.png
 .claude/
 __pycache__/
 
-# Native relay build output
-relay/target/
+# Lua test build output
+luatest/target/

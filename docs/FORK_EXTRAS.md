@@ -29,12 +29,9 @@ played between two PCs.
 - Regroup: only within the area you're both in (never loads another level), not while you or your partner is down,
   in a cutscene, in PvP or silent; it lands on the partner's own position.
 - Widgets: the fork's tips go through upstream's `status.notify` (which creates the tip from its class).
-- Rust relay (`relay/`): CRLF from the mod's files no longer reaches the wire; chunked UPnP replies are decoded on
-  bytes (a chunk boundary inside a UTF-8 character panicked).
 
-## Not compatible: the Rust relay
+## Removed: the Rust relay
 
-`relay/` speaks the protocol of the fork's earlier relay (AES-GCM / HMAC with SHA-256 keys, Steam channel 47800).
-Upstream 1.3 changed it (scrypt-stretched HMAC with a time window, its own Steam transport on channel 0, a different
-hello). Upstream's `autostart.lua` starts only its Python relay, so `relay/` isn't used; it stays for its tests (the
-Lua checks above run from it) until it is ported to the new protocol.
+The fork's Rust relay (`relay/`) spoke the fork's earlier protocol, which upstream 1.3 replaced, and upstream
+won't ship an exe. It's gone from the fork (in git history). Its Lua tests moved to `luatest/`:
+`cargo test --manifest-path luatest/Cargo.toml`.
