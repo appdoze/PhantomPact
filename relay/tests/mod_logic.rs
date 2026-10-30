@@ -47,11 +47,12 @@ function RegisterKeyBind(k, f) bound[k] = f end
 net = { enabled = true, localMap = "PBZ_Xigu_WP" }
 pawn = { K2_GetActorLocation = function() return { X = 0, Y = 0, Z = 0 } end }
 hp = { 100, 100 }
+host = true
 api = {
     log = function(s) logs[#logs + 1] = s end,
     valid = function(o) return o ~= nil end,
     game = { getHealth = function() return hp[1], hp[2] end },
-    coop = { net = net, handlers = {}, extraTicks = {}, sendEvent = function(k, ...)
+    coop = { net = net, handlers = {}, extraTicks = {}, isHost = function() return host end, sendEvent = function(k, ...)
         local args = { ... }
         sent[#sent + 1] = k .. (#args > 0 and (" " .. table.concat(args, " ")) or "")
     end },
@@ -89,8 +90,7 @@ fn shared_world_objects_go_to_the_ledger_once_and_gates_tell_the_player() {
          A PBZ_Xigu_WP-BP_Chest_C_UAID_60CF8480990963A302_1103301003\n"
     );
     let tips: Vec<String> = lua.globals().get("tips").unwrap();
-    assert_eq!(tips.len(), 1, "only the kick stone has no live opening: {tips:?}");
-    assert!(tips[0].contains("opened a shortcut"), "{tips:?}");
+    assert!(tips.is_empty(), "everything shared here opens live: {tips:?}");
 
     // A new session reads the ledger back; once the gate's area is loaded it opens through its own function and
     // leaves the list (the game records it); the chest is shown open and stays for pbzsave coop-sync.
@@ -100,7 +100,8 @@ fn shared_world_objects_go_to_the_ledger_once_and_gates_tell_the_player() {
             r#"
             local opened = {}
             local function actor(name) return {
-                IsValid = function() return true end, CurSwitchState = false,
+                IsValid = function() return true end, CurSwitchState = false, Finished = false,
+                K2_GetActorLocation = function() return { X = 0, Y = 0, Z = 0 } end,
                 OpenDoorNoAnim = function() opened[#opened + 1] = name end,
                 ["Change Switch State"] = function() opened[#opened + 1] = name end } end
             objects.PBZLevelActorManager = {
@@ -117,7 +118,7 @@ fn shared_world_objects_go_to_the_ledger_once_and_gates_tell_the_player() {
         )
         .eval()
         .unwrap();
-    assert!(out.starts_with("2 opened, 1 pending"), "gate opened (recorded), kick stone left to pbzsave, chest shown: {out}");
+    assert!(out.starts_with("2 opened, 2 pending"), "gate opened (recorded), chest shown, kick stone waits until you're 30-100 m away: {out}");
     assert!(out.contains("Block_Gate") && out.contains("Chest"), "{out}");
 }
 
@@ -268,4 +269,46 @@ fn partner_down_low_health_far_and_own_respawn_tips() {
     assert_eq!(tips, want);
     let bound: mlua::Table = lua.globals().get("bound").unwrap();
     assert!(bound.contains_key("G").unwrap(), "RegroupKey bound");
+}
+
+#[test]
+fn guest_joining_far_away_is_taken_to_the_host_once() {
+    let lua = load("partner.lua", &scratch("join"));
+    let out: String = lua
+        .load(
+            r#"
+            host = false
+            objects.PerformanceSystemSubsystem = { TeleportToTargetPoint = function(self, t, level)
+                teleports[#teleports + 1] = level end }
+            local tick = api.coop.extraTicks.partner
+            net.target = { X = 0, Y = 0, Z = 0, Yaw = 0, Hp = 100, MaxHp = 100, Map = "PBZ_Pangzhen_WP" }
+            for _ = 1, 3 do net.targetAt = os.clock() for _ = 1, 30 do tick() end end
+            return #teleports .. " " .. (teleports[1] or "-") .. " | " .. table.concat(tips, " / ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(out.starts_with("1 PBZ_Pangzhen_WP | "), "once, into the host's area: {out}");
+    assert!(out.contains("taking you to them"), "{out}");
+}
+
+#[test]
+fn partner_line_says_where_the_partner_is() {
+    let lua = load("hud.lua", &scratch("hud"));
+    let out: String = lua
+        .load(
+            r#"
+            local lines = {}
+            local function at(t) net.target = t net.targetAt = os.clock() lines[#lines + 1] = M.lineText() end
+            lines[#lines + 1] = M.lineText()
+            at({ X = 3500, Y = 0, Z = 0, Hp = 82, MaxHp = 100, Map = "PBZ_Xigu_WP" })
+            at({ X = 0, Y = 0, Z = 0, Hp = 0, MaxHp = 100, Map = "PBZ_Xigu_WP" })
+            at({ X = 0, Y = 0, Z = 0, Hp = 50, MaxHp = 100, Map = "PBZ_Xigu_WP", Cine = true })
+            at({ X = 0, Y = 0, Z = 0, Hp = 50, MaxHp = 100, Map = "PBZ_Duanhun_WP" })
+            return table.concat(lines, " | ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(out, "Partner: connecting... | Partner 82% · 35 m | Partner: down | Partner 50% · in a cutscene | Partner 50% · in another area");
 }

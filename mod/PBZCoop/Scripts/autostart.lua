@@ -107,6 +107,10 @@ return function(api)
 
     if api.partner then
         api.partner.bindKey(settings.regroupkey)
+        api.partner.joinRegroup = (settings.regrouponjoin or "on"):lower() ~= "off"
+    end
+    if api.hud then
+        api.hud.set((settings.partnerhud or "on"):lower() ~= "off", (settings.partnermarker or "on"):lower() ~= "off")
     end
 
     -- Heartbeat for the relay; written before the relay starts so it doesn't see a stale one.

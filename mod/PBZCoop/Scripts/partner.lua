@@ -42,6 +42,8 @@ return function(api)
         far = false,
         partnerCine = false,
         reviveAt = nil,             -- when the partner asked to revive us (os.clock)
+        joinRegroup = true,         -- guest: regroup with the host when the session starts far apart
+        joined = false,
         lastLine = nil,             -- last dialogue line sent
     }
     local ticks = 0
@@ -101,11 +103,37 @@ return function(api)
         end
     end
 
+    -- Guest joining far from the host (other area, or more than FAR_CM away): brought to the host once.
+    local function joinCheck()
+        if partner.joined or not fresh() then
+            return
+        end
+        partner.joined = true
+        if not partner.joinRegroup or coop.isHost() then
+            return
+        end
+        local t = net.target
+        local _, pawn = api.getPlayer1()
+        if not (valid(pawn) and t.Map) then
+            return
+        end
+        local l = pawn:K2_GetActorLocation()
+        local far = t.Map ~= net.localMap or math.sqrt((l.X - t.X) ^ 2 + (l.Y - t.Y) ^ 2) > FAR_CM
+        if far then
+            tip("regroup", "joined your partner's session: taking you to them.")
+            partner.regroup(true)
+        end
+    end
+
     -- Down after two checks in a row at 0 health; back when health returns.
     local function watchPartner()
         if not fresh() then
+            if not net.enabled then
+                partner.joined = false
+            end
             return
         end
+        joinCheck()
         local t = net.target
         if not (t.MaxHp and t.MaxHp > 0 and t.Hp) then
             return

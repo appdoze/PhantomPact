@@ -20,8 +20,9 @@
 --   rubbish pile BeginDestroyRubbish, gate / double door OpenDoorNoAnim, landscape door DoPositiveAction, ground
 --   blocker Break, rope ManualFadeRope: opened and recorded by the game itself;
 --   chest "Change Switch State", fog gate OpenByMobScript: shown open, not recorded.
--- Kick-down stones and cages only open through the player's own interaction, so they aren't changed live (regroup
--- gets you past one your partner opened). Every shared object goes to shared_world.txt; "pbzsave coop-sync" writes
+--   kick-down stone "Start PhysicsSimulate": it falls, not recorded; only while you're 30-100 m from it (its physics
+--   doesn't run from further away, and it mustn't land on you).
+-- Cages only open through the player's own interaction, so they aren't changed live (regroup gets you past one). Every shared object goes to shared_world.txt; "pbzsave coop-sync" writes
 -- the game's own record into the save with the game closed, so the rest is open from the next load. The contents
 -- of a chest stay with the player who opened it (new equipment is shared separately, J).
 --
@@ -51,7 +52,7 @@ return function(api)
         BP_DoubleDoor_G_C = { what = "door", live = "door" },
         BP_MoveableStuff_CollisionLandscape_door_C = { what = "door", live = "landscape" },
         BP_MoveableStuff_CollisionLandscape_C = { what = "door", live = "landscape" },
-        BP_KickStone_C = { what = "shortcut" },
+        BP_KickStone_C = { what = "shortcut", live = "kick" },
         BP_GroundBlocker_C = { what = "blocked path", live = "blocker" },
         BP_RopeConnection_C = { what = "rope", live = "rope" },
         BP_NarrativeCage_C = { what = "cage" },
@@ -249,8 +250,27 @@ return function(api)
         return state
     end
 
-    -- How each live object is opened, and whether the game records it by itself (then it leaves the pending list).
+    -- How each live object is opened, and whether the game records it by itself (then it leaves the pending list);
+    -- nil = not now (tried again on the next scan).
+    local KICK_MIN_CM, KICK_MAX_CM = 3000, 10000
+    local function kick(a)
+        if a.Finished then
+            return false
+        end
+        local _, pawn = api.getPlayer1()
+        if not valid(pawn) then
+            return nil
+        end
+        local s, p = a:K2_GetActorLocation(), pawn:K2_GetActorLocation()
+        local d = math.sqrt((s.X - p.X) ^ 2 + (s.Y - p.Y) ^ 2 + (s.Z - p.Z) ^ 2)
+        if d < KICK_MIN_CM or d > KICK_MAX_CM then
+            return nil
+        end
+        a["Start PhysicsSimulate"]()
+        return false
+    end
     local OPEN = {
+        kick = kick,
         rubbish = function(a) if not a.bDestroyed then a:BeginDestroyRubbish() end return true end,
         door = function(a) a:OpenDoorNoAnim() return true end,
         landscape = function(a) a:DoPositiveAction() return true end,
@@ -280,9 +300,15 @@ return function(api)
                     if sync.known then
                         sync.known.actors[id] = true     -- shown because of the partner: don't send it back
                     end
-                    if OPEN[SHARED[cn].live](a) then
+                    -- Each object on its own: one failing doesn't hold up the rest.
+                    local ok, recorded = pcall(OPEN[SHARED[cn].live], a)
+                    if not ok then
+                        log("Shared progress: couldn't open " .. id .. ": " .. tostring(recorded))
+                        recorded = nil
+                    end
+                    if recorded then
                         sync.pending[id] = nil      -- the game recorded it
-                    else
+                    elseif recorded == false then
                         sync.shown[id] = true       -- shown open this session; pbzsave coop-sync records it
                     end
                     log("Shared progress: partner's " .. SHARED[cn].what .. " " .. id)

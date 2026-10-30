@@ -70,6 +70,9 @@ the client logic runs on the echoed data, so host and client code both run in on
 | Equipment (`J`) | New accessories, medicine, weapons, Phantom Edge weapons (backpack `Accessories` / `MedicineInfos` / `MainWeaponInfos` / `ShaqiWeaponInfos`) go to the partner through `PushAccessoryToInventory`, `PushMedicineToInventory`, `AddWeaponItem`; unknown ids are refused by the backpack and reported as failed | The three calls ran in game (owned ids: no duplicate; unknown id: nothing added) |
 | Partner's moves as montages (`moves.lua`, `U`) | The montage your character plays (`AnimInstance:GetCurrentActiveMontage`, position) is sent when it starts or restarts; the ghost plays it with `Montage_Play` from that position plus half the ping. Ability replays (`M`) are used only until the first montage arrives, and always in PvP | In game: guard stance enter/exit, a Double Blade execution and a Phantom Edge skill played on a spawned ghost; the full loop (player's montage detected once, sent, played on a ghost at 0.03 s) ran with moves.lua |
 | Gates, doors, ropes, blocked paths (`A`, live) | When the object is loaded: `OpenDoorNoAnim` (block gate, double door), `DoPositiveAction` (landscape door), `Break` (ground blocker), `ManualFadeRope` (rope); each is recorded by the game itself | Each ran in game on an unopened one (XiGu rope, Fujizhilin landscape door and blocker, Pangzhen block gate): opened and recorded at once. Kick-down stone (`FinishKickStone`, `SwitchDoTrue`: flags only, the stone doesn't fall) and cage (opens only through the player's interaction) stay record-only |
+| Partner HUD (`hud.lua`) | A line at the top ("Partner 82% · 35 m", or down / in a cutscene / in another area) and a "Partner" label over the ghost, placed each tick with `ProjectWorldLocationToScreen` + `SetPositionInViewport` (the game's WB_TipsText) | In game with a test ghost: both shown where intended (game screenshot) |
+| Kick-down stones (`A`, live) | `Start PhysicsSimulate` while you're 30-100 m away (its physics doesn't run from far away; it mustn't land on you); not recorded, so pbzsave coop-sync records it | In game: from 197 m nothing happened; from 16 m the stone fell 14 m (and landed next to the player, hence the 30 m minimum) |
+| Regroup on join (`partner.lua`) | A guest whose first partner position is in another area or over 150 m away is taken to the host once (`RegroupOnJoin`) | Offline (mod_logic); the teleport is verified in game |
 | Revive (`partner.lua`, `Y`) | While the partner is down, the regroup key sends `Y`; the downed player, once back on their feet, is teleported to the reviver (same teleport as regroup) | Offline (mod_logic tests); the teleport is verified in game |
 | Dialogue (`partner.lua`, `T`) | A visible `PBZEventPipelineDialogWidget`'s `DialogueData.Text` is sent once per line; the partner sees it as a tip | Offline (mod_logic tests); no conversation was open to check the widget in game |
 | Partner in a cutscene | `P` line's last field (`PBZLevelSequenceManager.IsInSequence`); the ghost hides and a tip says so | IsInSequence read in game; hiding tested offline |
@@ -78,8 +81,8 @@ the client logic runs on the echoed data, so host and client code both run in on
 
 Not synced: enemy AI targets in the client world are its own (positions/health are pulled to the host's);
 cutscenes themselves (each player watches their own; the partner's ghost hides meanwhile); dialogue choices
-(lines are shown, choices stay each player's); kick-down stones and cages in the running game (recorded for the
-next load; regroup gets you past); lifts and other back-and-forth mechanisms; spending currency. Death itself stays
+(lines are shown, choices stay each player's); cages in the running game (recorded for the next load; regroup gets
+you past); lifts and other back-and-forth mechanisms; spending currency. Death itself stays
 in each player's game: revive brings the downed player back to their partner after their own respawn.
 
 Not needed: time of day and weather. In game, "Animate Time Of Day" is off and random weather is off: each area

@@ -28,6 +28,8 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 - Your partner's moves on their ghost as the game's own animations: attacks, guard stance, deflects, executions,
   weapon and Phantom Edge skills
 - Your partner's dialogue lines appear as tips
+- Your partner on screen: a top line with their health and distance, and a "Partner" label over their character
+- Joining far from the host takes the guest to them
 - Partner tips: your partner is down / back, their health getting low, watching a cutscene (their ghost hides),
   you've drifted far apart
 - Elden Ring–style co-op difficulty: enemies and bosses get more health and posture while you play together
@@ -64,7 +66,7 @@ Set a `Secret` (the same on both PCs) with any network for encrypted, authentica
 
 | Path | What it is |
 |---|---|
-| [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `sync.lua` (shared progress), `status.lua` (in-game tips), `partner.lua` (regroup, revive, partner tips, dialogue), `moves.lua` (partner's moves as montages), `autostart.lua` (reads `PhantomPact.ini`, starts the relay, turns sync on), `main.lua` (loader, commands) |
+| [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `sync.lua` (shared progress), `status.lua` (in-game tips), `partner.lua` (regroup, revive, partner tips, dialogue), `moves.lua` (partner's moves as montages), `hud.lua` (partner line and label), `autostart.lua` (reads `PhantomPact.ini`, starts the relay, turns sync on), `main.lua` (loader, commands) |
 | [relay/](relay/) | Native relay (Rust, `pbzcoop_relay.exe`): UDP / Steam transport, AES-GCM, UPnP; no Python needed ([docs/NATIVE_PLUGIN.md](docs/NATIVE_PLUGIN.md)). `cargo test --release --manifest-path relay\Cargo.toml` also compile-checks every mod script and runs `sync.lua` / `partner.lua` against stand-ins for the game |
 | [net/pbzcoop_net.py](net/pbzcoop_net.py) | Python relay, same protocol (the two interoperate): snapshots + reliable events; host, client, echo, record/replay |
 | [net/test_pbzcoop_net.py](net/test_pbzcoop_net.py) | Relay tests: `python -I net\test_pbzcoop_net.py` (also runs native and mixed native/Python pairs once relay/ is built) |
