@@ -105,6 +105,10 @@ return function(api)
         return
     end
 
+    if api.partner then
+        api.partner.bindKey(settings.regroupkey)
+    end
+
     -- Heartbeat for the relay; written before the relay starts so it doesn't see a stale one.
     local alivePath = modDir() .. "net_alive.txt"
     writeText(alivePath, tostring(os.time()))

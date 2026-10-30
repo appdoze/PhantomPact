@@ -130,6 +130,8 @@ return function(api)
         end
     end
 
+    status.notify = notify          -- other modules' tips (sync, partner), same once-a-minute rule
+
     function status.command(args)
         local a = (args or ""):lower()
         if a == "on" or a == "off" then

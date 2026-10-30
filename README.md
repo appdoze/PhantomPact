@@ -21,7 +21,10 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 - Shared resting: rest at a bell and enemies respawn for both
 - Shared progress (`ShareProgress = On`): quests, bells, enemy-group rewards, challenge points (Banyan Heart,
   Dragon Pillar, Scarecrow), codex entries, opened chests and broken rubbish piles follow both players, applied
-  through the game's own functions
+  through the game's own functions; gates, doors and shortcuts your partner opens are recorded for your next load
+- Regroup (F5): teleport next to your partner, also into their area, e.g. past a gate only they opened or after
+  you respawn at a bell
+- Partner tips: your partner is down / back, their health getting low, you've drifted far apart
 - Elden Ring–style co-op difficulty: enemies and bosses get more health and posture while you play together
 - PvP duels (`PvP = On`): the game's own block, parry and dodge; parries stagger the attacker; the loser dies
 - In-game status tips: partner connected or lost, settings that differ between the two PCs
@@ -56,8 +59,8 @@ Set a `Secret` (the same on both PCs) with any network for encrypted, authentica
 
 | Path | What it is |
 |---|---|
-| [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `sync.lua` (shared progress), `status.lua` (in-game tips), `autostart.lua` (reads `PhantomPact.ini`, starts the relay, turns sync on), `main.lua` (loader, commands) |
-| [relay/](relay/) | Native relay (Rust, `pbzcoop_relay.exe`): UDP / Steam transport, AES-GCM, UPnP; no Python needed ([docs/NATIVE_PLUGIN.md](docs/NATIVE_PLUGIN.md)). `cargo test --release --manifest-path relay\Cargo.toml` also compile-checks every mod script |
+| [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `sync.lua` (shared progress), `status.lua` (in-game tips), `partner.lua` (regroup, partner tips), `autostart.lua` (reads `PhantomPact.ini`, starts the relay, turns sync on), `main.lua` (loader, commands) |
+| [relay/](relay/) | Native relay (Rust, `pbzcoop_relay.exe`): UDP / Steam transport, AES-GCM, UPnP; no Python needed ([docs/NATIVE_PLUGIN.md](docs/NATIVE_PLUGIN.md)). `cargo test --release --manifest-path relay\Cargo.toml` also compile-checks every mod script and runs `sync.lua` / `partner.lua` against stand-ins for the game |
 | [net/pbzcoop_net.py](net/pbzcoop_net.py) | Python relay, same protocol (the two interoperate): snapshots + reliable events; host, client, echo, record/replay |
 | [net/test_pbzcoop_net.py](net/test_pbzcoop_net.py) | Relay tests: `python -I net\test_pbzcoop_net.py` (also runs native and mixed native/Python pairs once relay/ is built) |
 | [net/pbzcoop_bot.py](net/pbzcoop_bot.py) | Bot partner for live tests without a second PC |

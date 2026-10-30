@@ -66,8 +66,14 @@ the client logic runs on the echoed data, so host and client code both run in on
 | Currency | Dust gained locally (not by sync) is sent as `C <amount>` and added on the other PC: shared rewards. Spending isn't mirrored | +40 earned, `C 40` sent, the other side added 40, no echo loop |
 | Boss arena fog walls | On `B` the other PC closes `BP_FogDoor_C` within 60 m of its copy of the boss; on that boss's `K` it opens them | Fog wall rose at the tutorial boss arena entrance and opened on the boss's death |
 
+| Shared progress (`sync.lua`) | Quests, bells, enemy-group rewards, challenge points, codex entries, chests, rubbish piles, gates, doors and shortcuts (`Q L G N X A` events). Chests and rubbish piles change live; gates, doors and shortcuts are written to `shared_world.txt` for `pbzsave coop-sync` (open from the next load) | Calls used ran in game; not yet in a live co-op session |
+| Regroup (`partner.lua`, F5) | `PerformanceSystemSubsystem.TeleportToTargetPoint` to 80 cm behind the partner, in their area (`P` line: position, yaw, map) | Teleport function used in game (area to area); regroup itself tested offline only |
+| Partner tips (`partner.lua`) | From the `P` line's health: down (2 checks at 0), back, 50% / 25% health; 150 m apart; your own respawn | Offline (mod_logic tests) |
+
 Not synced: enemy AI targets in the client world are its own (positions/health are pulled to the host's);
-cutscenes; dialogue; chests other than `PBZPickupActor` pickups; spending currency.
+cutscenes; dialogue; chest contents (they stay with whoever opened it); gates, doors and shortcuts in the running
+game (recorded for the next load; regroup gets you past); lifts and other back-and-forth mechanisms; spending
+currency; time of day and weather. No revive: each player's death and respawn stay in their own game.
 
 Known limits found in testing:
 - Item ids are the `ItemId` field of `DT_InventoryData` rows (ASCII, e.g. `Weapon_Material_01`, `Item_001`,

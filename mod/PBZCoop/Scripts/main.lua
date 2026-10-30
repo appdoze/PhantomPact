@@ -6,7 +6,7 @@
 -- F8  spawn player 2: a second local player + a copy of player 1's character (F8-F11 need PBZCOOP_DEBUG=1)
 -- F9  remove player 2
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 local TAG = "[PBZCoop] "
 if (os.getenv("PBZCOOP_INSTANCE") or "1") ~= "1" then
     TAG = "[PBZCoop#" .. os.getenv("PBZCOOP_INSTANCE") .. "] "
@@ -435,6 +435,7 @@ api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
 api.scaling = dofile(SCRIPT_DIR .. "scaling.lua")(api)
 api.sync = dofile(SCRIPT_DIR .. "sync.lua")(api)
 api.status = dofile(SCRIPT_DIR .. "status.lua")(api)
+api.partner = dofile(SCRIPT_DIR .. "partner.lua")(api)
 local net = coop.net
 
 -- Helpers for the "eval" command, so test snippets can reuse the mod's functions.
@@ -486,6 +487,8 @@ COMMANDS.pvp = api.pvp.command
 COMMANDS.scale = api.scaling.command
 COMMANDS.sync = api.sync.command
 COMMANDS.tips = api.status.command
+COMMANDS.partner = api.partner.command
+COMMANDS.regroup = api.partner.regroup
 
 local function readCommandFile()
     local path = modDir() .. "cmd.txt"

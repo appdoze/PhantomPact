@@ -9,13 +9,16 @@
 --                          ExecuteNodeGuid record, the one the map's completion reads
 --   X <enemy class path>   a codex entry discovered: PBZCodexSubsystem.DiscoveredEnemyPaths (sending needs
 --                          "ShareCodex = On": reading the codex list isn't verified in game yet; receiving is)
---   A <Level>-<Actor>      a chest opened or a rubbish pile broken (the game's LevelActorManager key)
+--   A <Level>-<Actor>      a world object done: chest opened, rubbish pile broken, gate or door opened, shortcut
+--                          kicked down, blocked path broken, cage opened... (the game's LevelActorManager key)
 --
--- Chests and rubbish piles live in streamed-in levels, so the partner's are kept in a pending list and applied
--- when that actor is loaded: a rubbish pile through its own BeginDestroyRubbish (which also records it), a chest
--- through its own "Change Switch State" (shown open). A chest's record can't be written safely from Lua, so every
--- shared chest also goes to shared_world.txt; "pbzsave coop-sync" writes them into the save with the game closed,
--- and until then they are shown open again each session. The contents stay with the player who opened it.
+-- World objects live in streamed-in levels, so the partner's are kept in a pending list and applied when that
+-- actor is loaded: a rubbish pile through its own BeginDestroyRubbish (which also records it), a chest through its
+-- own "Change Switch State" (shown open). Gates, doors and shortcuts have no function verified in game yet, so
+-- they aren't changed in the running game (regroup gets you past one your partner opened). Every shared object
+-- goes to shared_world.txt; "pbzsave coop-sync" writes the game's own record for it into the save with the game
+-- closed, so it is open from the next load. Chests are shown open again each session until then. The contents of
+-- a chest stay with the player who opened it.
 --
 -- Only changes made while sync is on are shared: when sync starts, the current state is the baseline, so joining a
 -- partner never pushes either player's whole story onto the other. While a batch is applied the game's save veto
@@ -31,13 +34,29 @@ return function(api)
     local VETO_REASON = 0           -- EPBZSaveVetoReason::GameplayFlow
     local SUCCEEDED = 2             -- EQuestCompletion::QC_Succeded
     local LEDGER = "shared_world.txt"
-    local ACTOR_CLASSES = { "BP_Chest_C", "BP_Rubbish_C" }
+    -- World objects shared as "A <Level>-<Actor>": their LevelActorManager record means the same finished state
+    -- whoever made it (checked against real saves; pbzsave coop-sync writes that record). live: changed in the
+    -- running game through the object's own function (verified in game).
+    local SHARED = {
+        BP_Chest_C = { what = "chest", live = "chest" },
+        BP_Rubbish_C = { what = "rubbish pile", live = "rubbish" },
+        BP_Rubbish_b_C = { what = "rubbish pile" },
+        BP_FogDoor_C = { what = "fog gate" },
+        BP_Block_Gate_C = { what = "gate" },
+        BP_DoubleDoor_G_C = { what = "door" },
+        BP_MoveableStuff_CollisionLandscape_door_C = { what = "door" },
+        BP_KickStone_C = { what = "shortcut" },
+        BP_GroundBlocker_C = { what = "blocked path" },
+        BP_RopeConnection_C = { what = "rope" },
+        BP_NarrativeCage_C = { what = "cage" },
+    }
 
     local sync = {
         on = true,
         known = nil,                -- { quests = set, bells = set, ... } once the baseline is taken
         pending = {},               -- partner's chests / rubbish piles not applied yet: id -> true
         shown = {},                 -- chests shown open this session (their record waits for pbzsave coop-sync)
+        ledgered = {},              -- ids already in shared_world.txt
         codex = false,              -- send new codex entries (PhantomPact.ini ShareCodex)
         sent = 0,
         applied = 0,
@@ -93,12 +112,15 @@ return function(api)
         return id ~= nil and #id > 0 and #id < 256 and id:match("^[%w_%-%.%+]+$") ~= nil
     end
 
+    -- "<Level>-<Actor>" -> the actor's class when it's a shared one: the actor name is the class plus "_UAID_..."
+    -- (World Partition) or "_<n>".
     local function actorClass(id)
-        for _, cn in ipairs(ACTOR_CLASSES) do
-            if id:find("-" .. cn, 1, true) then
-                return cn
-            end
+        local name = id:match("^[^-]+%-(.+)$")
+        if not name then
+            return nil
         end
+        local cls = name:match("^(.-)_UAID_") or name:match("^(.-)_%d+$") or name
+        return SHARED[cls] and cls or nil
     end
 
     -- Ledger of shared chests and rubbish piles for pbzsave coop-sync; read at start, so the partner's chests from
@@ -117,6 +139,7 @@ return function(api)
                 local id = line:match("^A (%S+)")
                 if validId(id) and actorClass(id) then
                     sync.pending[id] = true
+                    sync.ledgered[id] = true
                 end
             end
             f:close()
@@ -198,21 +221,21 @@ return function(api)
             return
         end
         local classes = {}
-        for _, cn in ipairs(ACTOR_CLASSES) do
-            local inst = first(cn)
-            classes[cn] = inst and inst:GetClass() or nil
-        end
         for id in pairs(sync.pending) do
             local cn = actorClass(id)
-            if lam:HasSaveDataByActorID(FName(id)) then
-                sync.pending[id] = nil
+            if classes[cn] == nil then
+                local inst = first(cn)
+                classes[cn] = inst and inst:GetClass() or false
+            end
+            if lam:HasSaveDataByActorID(FName(id)) or not (cn and SHARED[cn].live) then
+                sync.pending[id] = nil      -- recorded already, or nothing to do live (pbzsave coop-sync records it)
             elseif classes[cn] and not sync.shown[id] then
                 local a = lam:GetActorByID(FName(id), classes[cn])
                 if valid(a) then
                     if sync.known then
                         sync.known.actors[id] = true     -- shown because of the partner: don't send it back
                     end
-                    if cn == "BP_Rubbish_C" then
+                    if SHARED[cn].live == "rubbish" then
                         if not a.bDestroyed then
                             a:BeginDestroyRubbish()
                         end
@@ -223,7 +246,7 @@ return function(api)
                         end
                         sync.shown[id] = true
                     end
-                    log("Shared progress: partner's " .. (cn == "BP_Rubbish_C" and "rubbish pile" or "chest") .. " " .. id)
+                    log("Shared progress: partner's " .. SHARED[cn].what .. " " .. id)
                 end
             end
         end
@@ -363,14 +386,20 @@ return function(api)
     end
 
     coop.handlers.A = function(id)
-        if not (validId(id) and actorClass(id)) then
+        local cn = validId(id) and actorClass(id)
+        if not cn then
             return
         end
-        if not sync.pending[id] then
+        if not sync.pending[id] and not sync.ledgered[id] then
+            sync.ledgered[id] = true
             sync.pending[id] = true
             appendLedger(id)
+            if not SHARED[cn].live and api.status and api.status.notify then
+                api.status.notify("world", "your partner opened a " .. SHARED[cn].what .. ": it opens for you from your "
+                    .. "next load (pbzsave coop-sync). Regroup to get past it now.")
+            end
         end
-        apply("chest / rubbish pile", "actors", id, applyPending)
+        apply(SHARED[cn].what, "actors", id, applyPending)
     end
 
     coop.extraTicks.sync = function()
@@ -403,7 +432,8 @@ return function(api)
             waiting = waiting + 1
         end
         log(string.format("Shared progress %s: sent %d, applied %d, failed %d, %d chest(s) / rubbish pile(s) waiting "
-            .. "for their area (quests, bells, enemy rewards, challenge points, codex, chests, rubbish piles)",
+            .. "for their area (quests, bells, enemy rewards, challenge points, codex, chests, rubbish piles, "
+            .. "gates, doors, shortcuts)",
             sync.on and "on" or "off", sync.sent, sync.applied, sync.failed, waiting))
     end
 
