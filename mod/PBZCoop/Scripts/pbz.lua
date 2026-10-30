@@ -240,6 +240,36 @@ return function(api)
         end
     end
 
+    -- A native kill (death by damage) rolls the enemy's loot table (GetCombatLootDataForOwner, owner = the enemy,
+    -- at its "Level" attribute). Kill(), which the host uses for the client's killing blow, skips it, so that kill
+    -- would pay nothing: the host rolls the same table here. Returns dust and { itemId = count }.
+    -- (Prologue enemies are level 0, which pays nothing; "lootlevel <n>" overrides the level for testing.)
+    game.lootLevelOverride = nil
+    function game.rollLoot(actor)
+        local level = game.lootLevelOverride
+        if level == nil then
+            local ok, v = pcall(function() return actor.AttributeSetBase.Level.CurrentValue end)
+            level = (ok and type(v) == "number") and math.floor(v + 0.5) or 0
+        end
+        local data = {}
+        if not pcall(function() actor:GetCombatLootDataBySelf(level, data) end) then
+            return 0, {}, level
+        end
+        local dust = tonumber(data.LootDust) or 0
+        local items = {}
+        pcall(function()
+            data.LootItems:ForEach(function(k, v)
+                items[k:get():ToString()] = v:get()
+            end)
+        end)
+        return dust, items, level
+    end
+
+    game.commands.lootlevel = function(arg)
+        game.lootLevelOverride = tonumber(arg)
+        log("Loot level override: " .. tostring(game.lootLevelOverride) .. " (empty = the enemy's own level)")
+    end
+
     function game.isBoss(actor)
         if bosses[actor:GetAddress()] then
             return true

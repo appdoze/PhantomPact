@@ -1,4 +1,4 @@
-# Edge cases of who-decides-what (docs/AUTHORITY.md), on a fresh two-copy session (pvp-session.ps1):
+﻿# Edge cases of who-decides-what (docs/AUTHORITY.md), on a fresh two-copy session (pvp-session.ps1):
 #   double hits   a swing replayed by the ghost must not count again (PvP on: the ghost has a real Attack)
 #   host kills    the client's copy of a host enemy can't die before the host says so, and does when it does
 #   heals         a heal on the host's enemy reaches the client's copy
@@ -64,7 +64,10 @@ Check 'host swing: no hit applied twice on the host' ((Num $h1 'applied') -eq (N
 Q 1 "eval PBZ.game.setHealth(PBZT.e, select(2,PBZ.game.getHealth(PBZT.e))) return 'full'" 1.5 | Out-Null
 Start-Sleep 1.5
 $h0 = Q 1 'eval return PBZT.st()'; $c0 = Q 2 'eval return PBZT.st()'
-for ($k = 0; $k -lt 3; $k++) { Q 2 "eval local _,p=PBZ.getPlayer1() PBZT.front(p,PBZT.e,150) return 'placed'" 0.2 | Out-Null; Q 1 "eval PBZT.front(PBZ.net.ghost,PBZT.e,150) return 'placed'" 0.2 | Out-Null; Q 2 'eval return tostring(PBZT.swing())' 1.6 | Out-Null }
+for ($k = 0; $k -lt 8; $k++) {
+    Q 2 "eval local _,p=PBZ.getPlayer1() PBZT.front(p,PBZT.e,150) return 'placed'" 0.2 | Out-Null; Q 1 "eval PBZT.front(PBZ.net.ghost,PBZT.e,150) return 'placed'" 0.2 | Out-Null; Q 2 'eval return tostring(PBZT.swing())' 1.6 | Out-Null
+    if ((Num (Q 2 'eval return PBZT.st()' 0.3) 'reported') -gt (Num $c0 'reported')) { break }
+}
 Start-Sleep 1.5
 $h1 = Q 1 'eval return PBZT.st()'; $c1 = Q 2 'eval return PBZT.st()'
 $clientDrop = (Num $c0 'hp') - (Num $c1 'hp'); $hostDrop = (Num $h0 'hp') - (Num $h1 'hp')
@@ -82,13 +85,28 @@ Check 'heal on the host reaches the client' ((Num $c0 'hp') -le 201 -and [math]:
 
 # --- host decides deaths: the client's killing blow can't kill its copy on its own; the host's K does.
 Q 1 "eval PBZ.game.setHealth(PBZT.e, 20) return 'low'" 1.5 | Out-Null
+# The kill must pay the enemy's loot once (the game's own roll is skipped by the host's Kill): prologue enemies
+# are level 0 and pay nothing, so the host rolls as if level 1 for this test.
+Q 1 'lootlevel 1' 0.5 | Out-Null
+$dustH0 = Num (Q 1 "eval local _,p=PBZ.getPlayer1() return 'dust='..p.ConsciousnessDust" 1) 'dust'
+$dustC0 = Num (Q 2 "eval local _,p=PBZ.getPlayer1() return 'dust='..p.ConsciousnessDust" 1) 'dust'
 $tk = Get-Date
-for ($k = 0; $k -lt 4; $k++) { Q 2 "eval local _,p=PBZ.getPlayer1() PBZT.front(p,PBZT.e,150) return 'placed'" 0.2 | Out-Null; Q 1 "eval PBZT.front(PBZ.net.ghost,PBZT.e,150) return 'placed'" 0.2 | Out-Null; Q 2 'eval return tostring(PBZT.swing())' 1.2 | Out-Null }
+for ($k = 0; $k -lt 10; $k++) {
+    Q 2 "eval local _,p=PBZ.getPlayer1() PBZT.front(p,PBZT.e,150) return 'placed'" 0.2 | Out-Null; Q 1 "eval PBZT.front(PBZ.net.ghost,PBZT.e,150) return 'placed'" 0.2 | Out-Null; Q 2 'eval return tostring(PBZT.swing())' 1.2 | Out-Null
+    if ((Q 1 'eval return PBZT.st()' 0.3) -match 'dead=true') { break }
+}
 Start-Sleep 2
 $h1 = Q 1 'eval return PBZT.st()'; $c1 = Q 2 'eval return PBZT.st()'
 $klog = @(Get-ModLog -Since $tk | Where-Object { $_ -match '\[PBZCoop#2\] Host says .* died' })
 Check "client's killing blow: host's enemy dies" ($h1 -match 'dead=true') $h1
 Check 'client copy dies by the host''s word' ($c1 -match 'dead=true' -and $klog.Count -ge 1) "$c1 / K lines $($klog.Count)"
+Start-Sleep 1.5
+$dustH1 = Num (Q 1 "eval local _,p=PBZ.getPlayer1() return 'dust='..p.ConsciousnessDust" 1) 'dust'
+$dustC1 = Num (Q 2 "eval local _,p=PBZ.getPlayer1() return 'dust='..p.ConsciousnessDust" 1) 'dust'
+Check "client's kill pays the loot once, shared" (($dustH1 - $dustH0) -gt 0 -and ($dustC1 - $dustC0) -eq ($dustH1 - $dustH0)) "host dust $dustH0 -> $dustH1, client $dustC0 -> $dustC1"
+Q 1 'lootlevel' 0.3 | Out-Null
+$clean = 'eval local _,p=PBZ.getPlayer1() p:ChangeDustNumInternal(-p.ConsciousnessDust) return "clean"'
+Q 1 $clean 0.3 | Out-Null; Q 2 $clean 0.3 | Out-Null
 
 # --- deaths and bells
 $tr = Get-Date

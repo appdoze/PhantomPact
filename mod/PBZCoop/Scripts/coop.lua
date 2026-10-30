@@ -654,6 +654,27 @@ return function(api)
         end
     end
 
+    -- Host: the client's hit killed this enemy. The game's own loot roll didn't run (see game.rollLoot), so it's
+    -- rolled here, once. Dust goes to the host like any kill's and reaches the client as shared dust ("C");
+    -- items go to the client, who made the kill (as single-player gives them to the killer).
+    local function payKillLoot(name, actor)
+        local dust, items, level = game.rollLoot(actor)
+        local _, pawn = getPlayer1()
+        local paid = {}
+        if dust > 0 and valid(pawn) and pcall(function() pawn:ChangeDustNumInternal(dust) end) then
+            paid[#paid + 1] = dust .. " dust"
+        end
+        for itemId, count in pairs(items) do
+            for _ = 1, math.max(1, math.floor(count)) do
+                sendEvent("I", "loot:" .. name, itemId)
+            end
+            paid[#paid + 1] = itemId .. " x" .. count
+        end
+        if #paid > 0 then
+            log(string.format("Your partner's kill (%s, level %d): %s.", name, level, table.concat(paid, ", ")))
+        end
+    end
+
     handlers.D = function(rest)
         local name, amount, posture, lethal = rest:match("^(%S+) (%S+)%s*(%S*)%s*(%S*)")
         amount = tonumber(amount)
@@ -663,7 +684,11 @@ return function(api)
         if isHost() and name and amount then
             local actor = enemyByName[name]
             if valid(actor) and game.applyDamage then
+                local wasAlive = not (game.isDead and game.isDead(actor))
                 game.applyDamage(actor, amount, tonumber(posture) or 0)
+                if wasAlive and game.isDead and game.isDead(actor) and game.rollLoot then
+                    payKillLoot(name, actor)
+                end
                 net.stats.hitsApplied = (net.stats.hitsApplied or 0) + 1
                 if net.hostSeen[name] then
                     -- A reported hit, not the ghost's: the PvP undo check must take this as the new baseline.

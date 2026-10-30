@@ -26,6 +26,7 @@ Host = the player whose world is shared (Role = Host). Client = the guest.
 | Death respawn | **the one who died** | own PC (the game refreshes your world) | host: `R death`; client: nothing | a client's death leaves the host's world (and fight) alone; the client re-kills what the host killed |
 | Pickups | **whoever picks it up** | own PC | reliable `I <pickup> <item>` | the other side removes its copy and gets the item; if both grabbed it in the same moment, nobody gets a second one |
 | Dust (currency) | **whoever earns it** | own PC | reliable `C <amount>` | amounts the mod added for the other player are excluded from what it sends back |
+| Kill loot | **Host** rolls it | host | dust via `C`; the client's items via `I loot:<enemy>` | the host's own kills roll natively; a client's killing blow (the host's `Kill()` skips the roll) is rolled by the host once, with the game's own table and the enemy's level |
 | PvP (duels) | **the defender** | each player's own PC | `V lose`, `V parry` | the loser's own PC decides the death; scores move once per death |
 | Events in general | sender | | `<session> <id> ...` | the relay resends until acked; the receiver plays ids in order, once each, per session |
 
@@ -83,10 +84,18 @@ The tested save is in the prologue. The game blocks respawns there (`RespawnSequ
 into the ambush forest"), and kills there pay no dust. Checked by calling the respawn's own refresh step, not by a
 real respawn:
 
-- a real death respawn (it also autosaves and costs "days", so it isn't run on a real save)
-- dust for a kill made by the client's reported hit. The host kills that enemy with no instigator and the client's
-  copy dies by the host's word, so the game may pay that kill to nobody. Kills pay no dust in the prologue at all,
-  so this needs a later save to check.
+- a real death respawn that refreshes the world. Checked instead (tools\pvp\respawn-check.ps1, with the save
+  restored after): real PvP deaths on both sides, spectating on a real death, and the game's own `Respawn` bringing
+  the player back (850 HP, camera back). UE4SS hooks also see calls made inside blueprints: `Respawn` calling
+  `Respawn Recover Attributes` and `Respawn Set Transform`, and `Respawn Refresh Monster` calling the game mode's
+  `Refresh Monster` (which is what tells a death from a bell rest). In the prologue `Respawn` skips the monster
+  refresh and the save. Elsewhere that step exists to refresh monsters, and its path into the mod is verified.
+- kill loot on a real later-game enemy. What was found instead: a native kill rolls the enemy's loot table
+  (`GetCombatLootDataForOwner`, owner = the dying enemy, at its `Level` attribute). The host's `Kill()` for the
+  client's killing blow skipped that roll, so the kill paid nobody. The host now rolls the same table itself, once:
+  dust goes to the host and reaches the client as shared dust, and items go to the client, who made the kill.
+  Prologue enemies are level 0, which pays nothing. At a forced level 1 the table paid 99 dust (146 at level 3,
+  270 at level 10), and the scenario test checks that the client's kill pays both players the same amount.
 - whether a boss killed by reported damage counts as beaten for the host's save
 
 ## Executions and late joins
