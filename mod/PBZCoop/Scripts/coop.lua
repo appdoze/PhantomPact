@@ -749,7 +749,9 @@ return function(api)
                 sendEvent("R")
             end)
         end
-        if game.ghostAggro and isHost() and valid(net.ghost) and net.seq % AGGRO_EVERY == 0 then
+        -- Both worlds: nearby enemies take the partner's ghost as a target too (on the guest, the host's ghost), so
+        -- an enemy fighting the other player turns to them in this world as well.
+        if game.ghostAggro and valid(net.ghost) and not net.ghostHidden and net.seq % AGGRO_EVERY == 0 then
             game.ghostAggro(net.ghost, net.pvp)
         end
     end

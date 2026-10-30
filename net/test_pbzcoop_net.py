@@ -450,6 +450,25 @@ class Latency(RelayLoopback):
         self.assertLess(median, 0.035)
 
 
+@unittest.skipUnless(os.name == "nt", "the stand-in tool is a .cmd script")
+class CoopSyncAfterGame(unittest.TestCase):
+    def test_tool_runs_with_the_ledger_once_the_game_is_gone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tool = os.path.join(tmp, "fake_pbzsave.cmd")
+            write(tool, "@echo args: %*\r\n")
+            write(os.path.join(tmp, "PhantomPact.ini"), f"CoopSyncTool = {tool}\n")
+            log = os.path.join(tmp, "coop_sync.log")
+            pbzcoop_net.coop_sync_after_game(tmp, lambda: False, 5)
+            self.assertFalse(os.path.exists(log), "nothing shared: nothing run")
+            write(os.path.join(tmp, "shared_world.txt"), "A PBZ_Xigu_WP-BP_Chest_C_1\n")
+            pbzcoop_net.coop_sync_after_game(tmp, lambda: True, 0.01)
+            self.assertIn("didn't exit", read(log))
+            calls = []
+            pbzcoop_net.coop_sync_after_game(tmp, lambda: calls.append(1) or len(calls) < 2, 10)
+            self.assertIn("args: coop-sync", read(log))
+            self.assertIn("shared_world.txt", read(log))
+
+
 # ------------------------------------------------------------------------------- native relay (relay/, Rust)
 
 NATIVE_RELAY = [NATIVE]

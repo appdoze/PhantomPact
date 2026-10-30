@@ -995,6 +995,46 @@ def run_replay(folder, path, seconds, client_log):
         write_atomic(status_path, "role=replay connected=no stopped=yes\n")
 
 
+def game_running():
+    """Is PBZ.exe still running (Windows: tasklist; elsewhere the game doesn't run)."""
+    if os.name != "nt":
+        return False
+    import subprocess
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq PBZ.exe", "/NH"], capture_output=True, text=True,
+                             creationflags=0x08000000).stdout
+    except OSError:
+        return False
+    return "pbz.exe" in out.lower()
+
+
+def coop_sync_after_game(folder, running, timeout):
+    """PhantomPact.ini CoopSyncTool = path to pbzsave.exe: once the game has closed, record what the partner shared
+    (shared_world.txt) in the save with "pbzsave coop-sync" (it refuses while the game runs, so wait for it to
+    exit). The tool's output goes to coop_sync.log in the mod folder."""
+    import subprocess
+    tool = read_ini(folder).get("coopsynctool", "")
+    log = os.path.join(folder, "coop_sync.log")
+    ledger = os.path.join(folder, "shared_world.txt")
+    if not tool or not read_text(ledger).strip():
+        return
+    if not os.path.isfile(tool):
+        write_atomic(log, f"CoopSyncTool not found: {tool}\n")
+        return
+    deadline = time.monotonic() + timeout
+    while running():
+        if time.monotonic() >= deadline:
+            write_atomic(log, "the game didn't exit in time; nothing written (run pbzsave coop-sync by hand)\n")
+            return
+        time.sleep(2)
+    try:
+        p = subprocess.run([tool, "coop-sync", ledger], capture_output=True, text=True,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+        write_atomic(log, f"exit {p.returncode}\n{p.stdout}{p.stderr}")
+    except OSError as e:
+        write_atomic(log, f"couldn't run {tool}: {e}\n")
+
+
 ALIVE_TIMEOUT = 30.0     # s without a heartbeat from the mod before a relay the mod started gives up
 
 
@@ -1079,6 +1119,7 @@ def main():
           f"{relay.extra_status}", flush=True)
     start = time.monotonic()
     last_status = 0.0
+    game_closed = False
     try:
         while True:
             now = time.monotonic()
@@ -1092,6 +1133,7 @@ def main():
                 break
             if args.alive_file and not game_alive(args.alive_file, args.alive_timeout):
                 print("the game's heartbeat stopped: game closed, relay exiting", flush=True)
+                game_closed = True
                 break
             if mapping:
                 mapping.keep_alive(now)
@@ -1106,6 +1148,8 @@ def main():
             mapping.close()
         relay.transport.close()
         write_atomic(relay.status_path, f"role={args.role} connected=no stopped=yes\n")
+    if game_closed:
+        coop_sync_after_game(args.dir, game_running, 120.0)
 
 
 if __name__ == "__main__":

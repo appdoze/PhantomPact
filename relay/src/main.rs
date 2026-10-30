@@ -224,6 +224,7 @@ fn main() -> ExitCode {
     let alive_timeout = a.get("--alive-timeout").and_then(|s| s.parse().ok()).unwrap_or(ALIVE_TIMEOUT);
     let start = Instant::now();
     let mut last_status: Option<Instant> = None;
+    let mut game_closed = false;
     loop {
         relay.tick();
         if last_status.map_or(true, |t| t.elapsed() >= Duration::from_secs(1)) {
@@ -238,6 +239,7 @@ fn main() -> ExitCode {
         if let Some(f) = &alive {
             if !game_alive(f, alive_timeout) {
                 println!("the game's heartbeat stopped: game closed, relay exiting");
+                game_closed = true;
                 break;
             }
         }
@@ -248,12 +250,91 @@ fn main() -> ExitCode {
     }
     drop(mapping); // removes the router's port forward
     files::write_atomic(&relay.status_path, &format!("role={} connected=no stopped=yes\n", a.role));
+    if game_closed {
+        coop_sync_after_game(&dir, game_running, Duration::from_secs(120));
+    }
     ExitCode::SUCCESS
+}
+
+/// PhantomPact.ini CoopSyncTool = path to pbzsave.exe: once the game has closed, record what the partner shared
+/// (shared_world.txt) in the save with "pbzsave coop-sync" (it refuses while the game runs, so wait for it to exit).
+/// The tool's output goes to coop_sync.log in the mod folder.
+fn coop_sync_after_game(dir: &Path, running: impl Fn() -> bool, timeout: Duration) {
+    let tool = files::read_ini(dir).into_iter().rev().find(|(k, _)| k == "coopsynctool").map(|(_, v)| v).unwrap_or_default();
+    let log = dir.join("coop_sync.log");
+    let ledger = dir.join("shared_world.txt");
+    if tool.is_empty() || !files::read_text(&ledger).lines().any(|l| !l.trim().is_empty()) {
+        return;
+    }
+    if !Path::new(&tool).is_file() {
+        files::write_atomic(&log, &format!("CoopSyncTool not found: {tool}\n"));
+        return;
+    }
+    let deadline = Instant::now() + timeout;
+    while running() {
+        if Instant::now() >= deadline {
+            files::write_atomic(&log, "the game didn't exit in time; nothing written (run pbzsave coop-sync by hand)\n");
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    let mut cmd = std::process::Command::new(&tool);
+    cmd.arg("coop-sync").arg(&ledger);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let text = match cmd.output() {
+        Ok(o) => format!("exit {}\n{}{}", o.status, String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+        Err(e) => format!("couldn't run {tool}: {e}\n"),
+    };
+    files::write_atomic(&log, &text);
+}
+
+/// Is PBZ.exe still running (Windows: tasklist; elsewhere the game doesn't run).
+fn game_running() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if let Ok(o) = std::process::Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq PBZ.exe", "/NH"])
+            .creation_flags(0x0800_0000)
+            .output()
+        {
+            return String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains("pbz.exe");
+        }
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn coop_sync_runs_the_tool_once_the_game_is_gone() {
+        let d = std::env::temp_dir().join("pbzcoop_relay_tests").join("coopsync");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // A stand-in for pbzsave.exe: writes its arguments.
+        let tool = d.join("fake_pbzsave.cmd");
+        std::fs::write(&tool, "@echo args: %*\r\n").unwrap();
+        std::fs::write(d.join("PhantomPact.ini"), format!("CoopSyncTool = {}\n", tool.display())).unwrap();
+        // Nothing shared: nothing run.
+        coop_sync_after_game(&d, || false, Duration::from_secs(5));
+        assert!(!d.join("coop_sync.log").exists());
+        std::fs::write(d.join("shared_world.txt"), "A PBZ_Xigu_WP-BP_Chest_C_1\n").unwrap();
+        // The game still running past the timeout: refused, nothing run.
+        coop_sync_after_game(&d, || true, Duration::from_millis(10));
+        assert!(files::read_text(&d.join("coop_sync.log")).contains("didn't exit"));
+        // The game gone: the tool runs with coop-sync and the ledger.
+        let calls = std::cell::Cell::new(0);
+        coop_sync_after_game(&d, || { calls.set(calls.get() + 1); calls.get() < 2 }, Duration::from_secs(10));
+        let log = files::read_text(&d.join("coop_sync.log"));
+        assert!(log.contains("args: coop-sync") && log.contains("shared_world.txt"), "{log}");
+    }
 
     #[test]
     fn echo_moves_only_the_player_line() {

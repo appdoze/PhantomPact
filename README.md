@@ -23,7 +23,10 @@ share loot and dust, and rest at bells together. The host's world leads, and you
   Dragon Pillar, Scarecrow), codex entries, opened chests and broken rubbish piles follow both players, applied
   through the game's own functions; new equipment either player gets (from chests or anywhere) goes to both;
   gates, doors, ropes, blocked paths, kick-down stones and lifts follow too, and quests step by step
-- Catch-up (`CatchUp = On`): two saves that differ end up with everything either player has done
+- Upgrades follow: weapon, Phantom Edge, accessory and medicine levels and Soul Snap (raised, never lowered)
+- Catch-up (`CatchUp = On`): two saves that differ end up with everything either player has done; a tip warns when
+  your New Game+ cycle or difficulty differs from your partner's
+- Optional `CoopSyncTool`: when the game closes, the relay records what your partner shared in your save
 - Regroup (F5): teleport next to your partner, also into their area, e.g. past a gate only they opened or after
   you respawn at a bell; while your partner is down, F5 revives them: they get back up right at your side
 - Your partner's moves on their ghost as the game's own animations: attacks, guard stance, deflects, executions,

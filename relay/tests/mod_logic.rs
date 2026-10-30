@@ -409,3 +409,43 @@ fn quest_steps_complete_the_same_branch_and_lifts_follow_the_partner() {
         .unwrap();
     assert_eq!(out, "BeginQuest, GetBranch MainCh2_PBZQuestBranch_4, SucceedBranch, BeginQuest, GetBranch MainCh2_PBZQuestBranch_4, up, down | sent 0");
 }
+
+#[test]
+fn upgrades_only_go_up_cycles_are_compared_and_lifts_wait_for_their_area() {
+    let lua = load("sync.lua", &scratch("levels"));
+    let out: String = lua
+        .load(
+            r#"
+            local calls = {}
+            local function obj(t) t.IsValid = function() return true end return t end
+            local levels = { Tang = 30 }
+            local function map(field) return { ForEach = function(_, f)
+                for id, lv in pairs(levels) do f({ get = function() return { ToString = function() return id end } end },
+                    { get = function() return { [field] = lv } end }) end end } end
+            local bp = obj({ MainWeaponInfos = map("WeaponLevel"),
+                UpgradeWeapon = function(_, id, normal, lv) calls[#calls + 1] = "UpgradeWeapon " .. id .. " " .. lv levels[id] = lv end })
+            function FindAllOf(cls) if cls == "PBZBackPackSubsystem" then return { bp } end return {} end
+            local O = api.coop.handlers.O
+            O("weap Tang 45")            -- partner higher: raised
+            O("weap Tang 40")            -- partner lower: nothing
+            O("weap Nope 50")            -- not owned here: fails, nothing called
+            O("weap Tang x")             -- malformed
+            -- cycle / difficulty
+            objects.PBZGameSystem = { GetCycleCount = function() return 1 end, GetDifficultModeByte = function() return 4 end }
+            api.coop.handlers.CYC("1 4")
+            api.coop.handlers.CYC("0 2")
+            -- a lift moved by the partner while its area isn't loaded here waits, then moves once loaded
+            objects.PBZLevelActorManager = { GetActorByID = function() return nil end }
+            function StaticFindObject(p) return obj({}) end
+            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_9_9 1")
+            local waiting = M.pendingLifts["PBZ_Fujizhilin_WP-BP_Lift_C_UAID_9_9"]
+            return table.concat(calls, ", ") .. " | failed " .. M.failed .. " | lift waiting " .. tostring(waiting)
+                .. " | " .. table.concat(tips, " / ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(out.starts_with("UpgradeWeapon Tang 45 | failed 1 | lift waiting true | "), "{out}");
+    assert!(out.contains("cycle 0, difficulty 2; yours is cycle 1, difficulty 4"), "{out}");
+    assert_eq!(out.matches("cycle:").count(), 1, "same cycle and difficulty: no tip: {out}");
+}

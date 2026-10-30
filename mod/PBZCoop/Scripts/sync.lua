@@ -12,6 +12,10 @@
 --   W <quest path> <branch> a quest step (branch) completed: the partner completes the same branch with its own
 --                          QuestBranch.SucceedBranch, so the story moves on step by step, not only at the end
 --   F <Level>-<Actor> <0|1> a lift moved: DoPositiveAction / DoNegativeAction (checked in game: moved, recorded)
+--   O <store> <id> <n>     an upgrade: weapon / Phantom Edge / accessory / medicine level, or Soul Snap; raised to the
+--                          partner's level (never lowered) with the backpack's own UpgradeWeapon / UpgradeAccessory /
+--                          UpgradeMedicine / SnapSoulWeapon (each checked in game)
+--   CYC <cycle> <difficulty> sent once per session; a tip says so when the two saves differ
 --   J <store> <id>         new equipment, from a chest or anywhere: accessory (acc), medicine (med), weapon (weap) or
 --                          Phantom Edge weapon (edge); the partner gets it through the backpack's own
 --                          PushAccessoryToInventory / PushMedicineToInventory / AddWeaponItem (checked in game)
@@ -169,6 +173,34 @@ return function(api)
         edge = { map = "ShaqiWeaponInfos", what = "Phantom Edge weapon", add = function(bp, id) bp:AddWeaponItem(FName(id), false, true, false, false) end },
     }
 
+    -- Upgrade levels per store: the backpack map, the field holding the level (Soul Snap: a bool), how to raise it.
+    local LEVELS = {
+        weap = { map = "MainWeaponInfos", field = "WeaponLevel", what = "weapon level",
+            raise = function(bp, id, lv) bp:UpgradeWeapon(FName(id), true, lv) end },
+        edge = { map = "ShaqiWeaponInfos", field = "ShaChiWeaponLevel", what = "Phantom Edge weapon level",
+            raise = function(bp, id, lv) bp:UpgradeWeapon(FName(id), false, lv) end },
+        acc = { map = "Accessories", field = "CurrentLevel", what = "accessory level",
+            raise = function(bp, id, lv) bp:UpgradeAccessory(FName(id), lv) end },
+        med = { map = "MedicineInfos", field = "CurrentLevel", what = "medicine level",
+            raise = function(bp, id, lv) bp:UpgradeMedicine(FName(id), lv) end },
+        weapsnap = { map = "MainWeaponInfos", field = "bAlreadySnapSoul", what = "Soul Snap",
+            raise = function(bp, id) bp:SnapSoulWeapon(FName(id), true) end },
+        edgesnap = { map = "ShaqiWeaponInfos", field = "bAlreadySnapSoul", what = "Soul Snap",
+            raise = function(bp, id) bp:SnapSoulWeapon(FName(id), false) end },
+    }
+
+    local function levelOf(bp, store, id)
+        local def = LEVELS[store]
+        local lv
+        bp[def.map]:ForEach(function(k, v)
+            if lv == nil and k:get():ToString() == id then
+                local x = v:get()[def.field]
+                lv = x == true and 1 or (x == false and 0 or tonumber(x))
+            end
+        end)
+        return lv
+    end
+
     local function backpack()
         for _, o in ipairs(FindAllOf("PBZBackPackSubsystem") or {}) do
             if valid(o) then
@@ -192,7 +224,8 @@ return function(api)
     end
 
     local function scan()
-        local state = { quests = {}, bells = {}, mobs = {}, nodes = {}, codex = {}, actors = {}, equip = {}, steps = {} }
+        local state = { quests = {}, bells = {}, mobs = {}, nodes = {}, codex = {}, actors = {}, equip = {}, steps = {},
+            levels = {} }
         local nc = first("PBZNarrativeComponent")
         if nc then
             each(nc:GetAllQuests(), function(e)
@@ -246,6 +279,15 @@ return function(api)
             for store, prop in pairs(EQUIP) do
                 bp[prop.map]:ForEach(function(k)
                     state.equip[store .. " " .. k:get():ToString()] = true
+                end)
+            end
+            for store, def in pairs(LEVELS) do
+                bp[def.map]:ForEach(function(k, v)
+                    local x = v:get()[def.field]
+                    local lv = x == true and 1 or (x == false and 0 or tonumber(x))
+                    if lv then
+                        state.levels[store .. " " .. k:get():ToString()] = lv
+                    end
                 end)
             end
         end
@@ -352,6 +394,13 @@ return function(api)
         local now = scan()
         if sync.known == nil then
             sync.known = now
+            if not sync.sentCycle then
+                sync.sentCycle = true
+                pcall(function()
+                    local gs = first("PBZGameSystem")
+                    coop.sendEvent("CYC", gs:GetCycleCount(), gs:GetDifficultModeByte())
+                end)
+            end
             if sync.catchUp and not sync.askedCatchUp then
                 sync.askedCatchUp = true
                 coop.sendEvent("Z")
@@ -366,6 +415,16 @@ return function(api)
                     coop.sendEvent(key, id)
                     sync.sent = sync.sent + 1
                 end
+            end
+        end
+        -- Levels: sent when one goes up (after "J", so new equipment exists on the partner's side first).
+        sync.known.levels = sync.known.levels or {}
+        for id, lv in pairs(now.levels or {}) do
+            if lv > (sync.known.levels[id] or 0) then
+                sync.known.levels[id] = lv
+                local store, item = id:match("^(%S+) (%S+)$")
+                coop.sendEvent("O", store, item, lv)
+                sync.sent = sync.sent + 1
             end
         end
     end
@@ -526,6 +585,7 @@ return function(api)
 
     -- Lifts: their direction (Positive) is sent when it changes; the partner's lift is moved the same way.
     sync.lifts = {}                 -- lift id -> Positive as last seen or set
+    sync.pendingLifts = {}          -- partner's lift moves for areas not loaded here: id -> up
     local function watchLifts()
         local _, pawn = api.getPlayer1()
         local world = valid(pawn) and worldName(pawn)
@@ -535,6 +595,19 @@ return function(api)
         for _, a in ipairs(FindAllOf("BP_Lift_C") or {}) do
             if valid(a) then
                 local id = world .. "-" .. a:GetFName():ToString()
+                -- The partner moved this lift while its area wasn't loaded here: move it now.
+                local want = sync.pendingLifts[id]
+                if want ~= nil then
+                    sync.pendingLifts[id] = nil
+                    if (a.Positive == true) ~= want then
+                        if want then
+                            a:DoPositiveAction()
+                        else
+                            a:DoNegativeAction()
+                        end
+                    end
+                    sync.lifts[id] = want
+                end
                 local up = a.Positive == true
                 local was = sync.lifts[id]
                 sync.lifts[id] = up
@@ -554,10 +627,11 @@ return function(api)
         apply("lift", "lifts", id, function()
             local lam = first("PBZLevelActorManager")
             local a = lam and lam:GetActorByID(FName(id), StaticFindObject("/Script/Engine.Actor"))
-            if not valid(a) then
-                return                      -- not loaded here: it stays where this world left it
-            end
             local up = dir == "1"
+            if not valid(a) then
+                sync.pendingLifts[id] = up  -- not loaded here: moved when its area loads (watchLifts)
+                return
+            end
             sync.lifts[id] = up             -- moved because of the partner: don't send it back
             if (a.Positive == true) ~= up then
                 if up then
@@ -567,6 +641,51 @@ return function(api)
                 end
             end
         end)
+    end
+
+    coop.handlers.O = function(rest)
+        local store, id, lv = (rest or ""):match("^(%a+) ([%w_%.%-]+) (%d+)$")
+        lv = tonumber(lv)
+        if not (store and LEVELS[store] and lv and lv <= 999) then
+            return
+        end
+        apply(LEVELS[store].what, "levelsApplied", store .. " " .. id, function()
+            local bp = backpack()
+            if not bp then
+                error("no backpack")
+            end
+            local cur = levelOf(bp, store, id)
+            if cur == nil then
+                error("not owned here")
+            end
+            if lv > cur then
+                LEVELS[store].raise(bp, id, lv)
+                local after = levelOf(bp, store, id) or cur
+                if sync.known then
+                    sync.known.levels = sync.known.levels or {}
+                    sync.known.levels[store .. " " .. id] = after     -- raised because of the partner: not sent back
+                end
+                if after <= cur then
+                    error("the backpack didn't raise it")
+                end
+            end
+        end)
+    end
+
+    coop.handlers.CYC = function(rest)
+        local cycle, diff = (rest or ""):match("^(%d+) (%d+)$")
+        cycle, diff = tonumber(cycle), tonumber(diff)
+        if not cycle then
+            return
+        end
+        local ok, mine, myDiff = pcall(function()
+            local gs = first("PBZGameSystem")
+            return gs:GetCycleCount(), gs:GetDifficultModeByte()
+        end)
+        if ok and (mine ~= cycle or myDiff ~= diff) and api.status and api.status.notify then
+            api.status.notify("cycle", string.format("your partner's save is in cycle %d, difficulty %d; yours is cycle %d, "
+                .. "difficulty %d: enemies and items can differ between your worlds.", cycle, diff, mine, myDiff))
+        end
     end
 
     coop.handlers.J = function(rest)
@@ -628,7 +747,7 @@ return function(api)
     function sync.set(on)
         sync.on = on
         sync.known = nil
-        sync.askedCatchUp, sync.answeredCatchUp = false, false
+        sync.askedCatchUp, sync.answeredCatchUp, sync.sentCycle = false, false, false
         log("Shared progress " .. (on and "on" or "off") .. ".")
     end
 
@@ -643,6 +762,13 @@ return function(api)
         for kind, key in pairs(KINDS) do
             for id in pairs(sync.known[kind] or {}) do
                 coop.sendEvent(key, id)
+                n = n + 1
+            end
+        end
+        for id, lv in pairs(sync.known.levels or {}) do
+            local store, item = id:match("^(%S+) (%S+)$")
+            if lv > 0 then
+                coop.sendEvent("O", store, item, lv)
                 n = n + 1
             end
         end
