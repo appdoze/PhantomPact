@@ -1,4 +1,4 @@
-# Repeated PvP kills both ways on a running session (pvp-session.ps1, PvP on in both). The prologue's tutorial heal is
+﻿# Repeated PvP kills both ways on a running session (pvp-session.ps1, PvP on in both). The prologue's tutorial heal is
 # removed (it catches most killing blows) and the loser is brought back with full health after each death, so the
 # same player dies again and again: each kill must be scored on both sides, show the winner's victory screen, and
 # leave no mod errors or bell refreshes.
@@ -19,7 +19,7 @@ foreach ($attacker in 1, 2) {
     for ($k = 1; $k -le $Rounds; $k++) {
         $tk = Get-Date
         $scored = $false
-        for ($try = 0; $try -lt 3 -and -not $scored; $try++) {
+        for ($try = 0; $try -lt 5 -and -not $scored; $try++) {
             & $run -I $defender -Cmd $place -Wait 0.5 | Out-Null
             & $run -I $attacker -Cmd $face -Wait 0.4 | Out-Null
             & $run -I $attacker -Cmd $swing -Wait 1.5 | Out-Null

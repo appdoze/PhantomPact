@@ -177,7 +177,7 @@ Q 1 'eval local _,p=PBZ.getPlayer1() local bp=StaticFindObject("/Script/Engine.D
 $state = Get-Content "$p\..\..\logs\selftest-last.json" -Raw | ConvertFrom-Json
 $tg = Get-Date
 Stop-Process -Id @($state.Relays)[0] -Force -ErrorAction SilentlyContinue
-Start-Sleep 9
+Start-Sleep 16
 $log = @(Get-ModLog -Since $tg -Last 3000)
 $cs = Q 2 'netstatus'
 Check 'client notices the host is gone' ([bool]($log -match '\[PBZCoop#2\] Lost the other player') -and $cs -match 'held=0') (($cs -split ' \| ' | Where-Object { $_ -match 'Mod:' }) -replace '.*(held=\d+).*', '$1')

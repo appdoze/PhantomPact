@@ -1064,7 +1064,7 @@ return function(api)
 
     -- No new snapshot for a while: they quit, crashed or lost the connection. Their ghost mustn't stand there
     -- frozen, and nothing may stay locked for a fight that's no longer happening (fog walls, held enemies).
-    local PARTNER_GONE_S = 5.0
+    local PARTNER_GONE_S = 12.0   -- longer than a loading screen (respawn teleport, streaming), which is silent too
     local function watchPartner()
         local gone = net.lastRemoteAt ~= nil and os.clock() - net.lastRemoteAt >= PARTNER_GONE_S
         if gone and not net.partnerGone then

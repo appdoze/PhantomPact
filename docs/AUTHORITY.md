@@ -1,4 +1,4 @@
-# Who decides what
+﻿# Who decides what
 
 Phantom Pact runs two full copies of the single-player game, one per PC. Nothing is shared by default: each game
 simulates its own world. The mod then decides, per system, whose copy is the truth and what crosses the network.
@@ -74,7 +74,7 @@ and played once in order. A killing blow on the client doesn't kill its copy loc
   Until the host respawns, the host's boss keeps fighting the client's ghost, and the client's hits still land.
   The client can finish the boss in that window.
 
-- **Your partner vanishes** (quits, crashes, loses the connection): after 5 s with nothing heard, their ghost
+- **Your partner vanishes** (quits, crashes, loses the connection): after 12 s with nothing heard (longer than a loading screen), their ghost
   hides instead of standing frozen. Fog walls closed for their fight open, and the enemies held for the host go
   back to normal. Their last snapshot is ignored even if a crashed relay left it on disk.
 
