@@ -10,3 +10,5 @@ art/screenshots/*.png
 # Local Claude Code settings
 .claude/
 __pycache__/
+# C++ relay build output (tools/build-native.ps1)
+native/build/

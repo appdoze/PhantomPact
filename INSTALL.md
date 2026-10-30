@@ -1,4 +1,4 @@
-# Phantom Pact 1.3.1: online co-op for Phantom Blade Zero
+# Phantom Pact 1.4.0: online co-op for Phantom Blade Zero
 
 Play the campaign with a friend: you see each other as a second Soul, fight the same enemies and bosses, and
 share loot, dust and bell rests. The host's world decides enemies, bosses and deaths; the guest's world follows.
@@ -13,9 +13,10 @@ https://github.com/yhsharaf/PhantomPact/issues, with what happened (host or gues
 
 1. **Phantom Blade Zero** on Steam.
 2. **UE4SS for Phantom Blade Zero** by Vercadi (Nexus Mods), installed in `PBZ\platform\steam`.
-3. **Python 3** from python.org (just click Install Now). Not needed with the GitHub download, which brings its own
-   in `PBZCoop\python`; the Nexus download doesn't include it.
-4. **Tailscale** (tailscale.com), both signed in to the same network.
+3. **Tailscale** (tailscale.com), both signed in to the same network.
+
+You don't need Python any more: since 1.4 the connection runs inside the game (`PBZCoop\dlls\main.dll`). Its source is
+in the GitHub repository (`native/`).
 
 ## Install (both players)
 
@@ -86,8 +87,12 @@ Not in PvP yet: executions (posture break only staggers).
 
 - **No "co-op on" line:** check `PhantomPact.ini` (Role, and HostAddress for the guest). The UE4SS log says what's
   missing.
-- **"Python wasn't found":** install Python 3 from python.org (just click Install Now), then restart the game.
+- **"dlls\main.dll isn't running":** your antivirus may have removed it. Extract the zip again and allow the file,
+  then restart the game. If you have Python 3 installed, the mod uses it instead.
+- **`relay_error.txt` in the mod folder:** the connection couldn't start, and the file says why (for example, the
+  port is in use). Post it with your bug report.
 - **`connected=no`:** both on Tailscale? The right IP in the guest's `HostAddress`? Windows Firewall must allow
-  Python on private networks (Windows asks the first time the host plays; click Allow).
+  the game on private networks (Windows asks the first time the host plays; click Allow). If the host clicked Cancel
+  back then, allow `PBZ.exe` in Windows Firewall settings.
 - **No `[PBZCoop] Loaded` line at all:** UE4SS isn't installed in `PBZ\platform\steam`, or the mod folder isn't at
   `platform\steam\ue4ss\Mods\PBZCoop`.

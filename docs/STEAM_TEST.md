@@ -1,7 +1,10 @@
 # Testing Steam joining (two real accounts)
 
-The one thing not yet tested is Steam carrying Phantom Pact's traffic between two different Steam accounts. The
-mod's side is covered by relay unit tests (net\test_pbzcoop_net.py) and by `tools\steam-check.ps1` on one PC.
+The one thing not yet tested is Steam carrying Phantom Pact's traffic between two different Steam accounts. Since 1.4
+the relay runs inside the game and shares the game's Steam connection. `tools\steam-check.ps1` shows that much on one
+PC: both copies reach Steam and stay up. The first thing to watch in a real test is the host taking the guest's
+session: that request reaches the DLL through a Steam callback, which only fires if the game runs Steam callbacks, and
+one account can't test that alone.
 This needs two people, or one person with two PCs, each signed into their own Steam account that owns the game.
 
 ## Setup (both players)
@@ -33,7 +36,9 @@ for the guest too), and pick something up.
 
 ## If it doesn't connect
 
-- `Steam didn't start for the relay`: Steam isn't running or signed in.
+- `Steam isn't ready` in `relay_error.txt`: Steam isn't running or signed in.
+- The guest sees the host but never connects, and the host shows no `peer connected` in `relay_log.txt`: the session
+  request didn't reach the DLL (see above). That's a mod bug, so send both logs.
 - The guest keeps `looking for a Steam friend`: the two accounts aren't Steam friends, or the host isn't in the
   game yet. Putting the host's Steam name in `HostAddress` rules out picking the wrong friend.
 - Send both `UE4SS.log` files. Tailscale (`Connect = Tailscale`) keeps working as before in the meantime.

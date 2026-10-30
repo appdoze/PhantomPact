@@ -384,8 +384,8 @@ class Relay:
                 continue
             try:
                 msg = json.loads(data)
-            except ValueError:
-                continue
+            except (ValueError, RecursionError):
+                continue            # (RecursionError: one packet of 60000 "[" used to kill the relay)
             if not isinstance(msg, dict) or msg.get("v") != PROTOCOL:
                 continue
             if self.role == "host" and self.peer != addr:

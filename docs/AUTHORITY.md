@@ -100,6 +100,11 @@ real respawn:
 
 ## Who may talk to the relay
 
+Everything below holds for both relays: the C++ one players run (`native/`, inside the game) and the Python fallback.
+They share packets and files, and the same tests run them against each other. The C++ one parses packets from the
+network inside the game process, so it limits JSON nesting, keeps a bounded list of ack sessions, and is tested with
+malformed packets.
+
 Raised by appdoze (issue #1 / PR #2) and reworked from their code:
 
 - **Sender filter.** The host relay only takes packets from addresses a partner can have: Tailscale, home networks,
@@ -141,5 +146,7 @@ Raised by appdoze (issue #1 / PR #2) and reworked from their code:
 - If both players swing at the same enemy within the same 1.5 s in PvP, the ghost's replay can't be told from your
   own hit, so that drop is reported. It's harmless outside PvP, where the ghost does no damage.
 - Enemy AI isn't synced: each world's copy picks its own attacks. Its position snaps back if it drifts over 4 m.
-- `Connect = Steam` is tested up to Valve's network: relay logic in unit tests, and Steam starting next to both
-  games. Two real accounts haven't connected through it yet; steps are in [STEAM_TEST.md](STEAM_TEST.md).
+- `Connect = Steam` is tested up to Valve's network: the Python relay's logic in unit tests, and the C++ relay reaching
+  Steam inside both games. Two real accounts haven't connected through it yet; steps are in
+  [STEAM_TEST.md](STEAM_TEST.md).
+- Over Steam, the C++ relay's session handling runs on code the unit tests can't reach, since it needs a running game.
