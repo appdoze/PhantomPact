@@ -13,3 +13,6 @@ __pycache__/
 
 # Lua test build output
 luatest/target/
+
+# C++ relay build output (tools/build-native.ps1)
+native/build/

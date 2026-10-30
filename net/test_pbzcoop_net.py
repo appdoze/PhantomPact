@@ -1,4 +1,9 @@
-"""Loopback tests for pbzcoop_net.py (stdlib only): python -I net/test_pbzcoop_net.py"""
+"""Loopback tests for pbzcoop_net.py (stdlib only): python -I net/test_pbzcoop_net.py
+
+The C++ relay (native/, tools/build-native.ps1) speaks the same packets and files. To test it, set
+PBZCOOP_NATIVE_RELAY to native/build/relay_cli.exe: the relay processes these tests start then run on it, for the roles
+in PBZCOOP_NATIVE_ROLES (default "host,client"; one role alone tests C++ against Python), and NativeRelay runs too.
+"""
 
 import os
 import subprocess
@@ -10,6 +15,8 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 RELAY = os.path.join(HERE, "pbzcoop_net.py")
 PORT = 47911
+NATIVE = os.environ.get("PBZCOOP_NATIVE_RELAY")
+NATIVE_ROLES = os.environ.get("PBZCOOP_NATIVE_ROLES", "host,client").split(",")
 
 
 def write(path, text):
@@ -54,8 +61,8 @@ class RelayLoopback(unittest.TestCase):
         self.tmp.cleanup()
 
     def start(self, *args):
-        p = subprocess.Popen([sys.executable, "-I", RELAY, *args], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+        command = [NATIVE] if NATIVE and args[0] in NATIVE_ROLES else [sys.executable, "-I", RELAY]
+        p = subprocess.Popen([*command, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.procs.append(p)
         return p
 
@@ -481,6 +488,99 @@ class CoopSyncAfterGame(unittest.TestCase):
             self.assertIn("args: coop-sync", text)
             self.assertIn("shared_world_NightmareRun0.txt", text)
             self.assertNotIn("shared_world_AutoSave0.txt", text, "empty ledgers are skipped")
+
+
+
+@unittest.skipUnless(NATIVE, "PBZCOOP_NATIVE_RELAY isn't set")
+class NativeRelay(RelayLoopback):
+    """What the C++ relay has to get right by itself: it's hand-written parsing of untrusted packets, in the game."""
+
+    def test_bad_packets_dont_stop_it_and_the_partner_still_connects(self):
+        import socket
+        port = PORT + 4
+        write(os.path.join(self.a, "net_out.txt"), "P 1 10.0 20.0 30.0 90.0 0 0\n")
+        write(os.path.join(self.b, "net_out.txt"), "P 7 0 0 0 0 0 0\n")
+        host = self.start("host", "--dir", self.a, "--port", str(port))
+        time.sleep(0.3)
+        bad = [
+            b"", b"\xff" * 100, b"{", b"[" * 60000, b'{"a":' * 10000, b'"' + b"\\" * 30000, b"PPA1", b"PPA1" + b"x" * 80,
+            b"null", b"[]", b"12", b'{"v":3,"t":"ping"}', b'{"t":"ping"}', b'{"v":2}', b'{"v":2,"t":5}',
+            b'{"v":2,"t":"ping","ts":"x"}', b'{"v":2,"t":"ping","ts":1e999}', b'{"v":2,"t":"pong","ts":' + b"9" * 400 + b"}",
+            b'{"v":2,"t":"pong","ts":true}', b'{"v":2,"t":"state","s":123,"e":{"sid":5,"l":3}}',
+            b'{"v":2,"t":"state","e":{"sid":"x","l":[1,null,"99999999999999999999 x","\\ud83d","1 ok"]}}',
+            b'{"v":2,"t":"ack","sid":"x","id":1e400}', b'{"v":2,"t":"ack","sid":"x","id":' + b"9" * 400 + b"}",
+            b'{"v":2,"t":"hello","ver":{"a":1},"cfg":{"pvp":1}}', b'{"v":2,"t":"hello","cfg":[]}',
+        ]
+        bad += [b'{"v":2,"t":"ack","sid":"s%d","id":1}' % i for i in range(100)]
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            for packet in bad:
+                s.sendto(packet, ("127.0.0.1", port))
+            time.sleep(0.5)
+        self.assertIsNone(host.poll(), "bad packets stopped the relay")
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(port))
+        # The fake sender was taken as the partner: it has to go silent for PEER_TIMEOUT first.
+        self.assertTrue(wait_for(lambda: read(os.path.join(self.b, "net_in.txt")).startswith("P 1"), timeout=10.0))
+        self.assertTrue(wait_for(lambda: read(os.path.join(self.a, "net_in.txt")).startswith("P 7"), timeout=10.0))
+        self.assertIsNone(host.poll())
+
+    def test_crlf_and_bad_utf8_from_the_mod_arrive_clean(self):
+        port = PORT + 5
+        with open(os.path.join(self.a, "net_out.txt"), "wb") as f:
+            f.write(b"P 1 0 0 0 0 0 0 Map\xff\r\nE Mob \xe4\xb8\xad 1\r\n")
+        with open(os.path.join(self.a, "net_events_out.txt"), "wb") as f:
+            f.write(b"S 5\r\n1 A attack\r\n2 K half")      # the last line is still being written
+        self.start("host", "--dir", self.a, "--port", str(port))
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(port))
+        b_in = os.path.join(self.b, "net_in.txt")
+        self.assertTrue(wait_for(lambda: "Mob" in read(b_in)), read(b_in))
+        text = read(b_in)
+        self.assertNotIn("\r", text)
+        self.assertIn("Map�\n", text)
+        self.assertIn("Mob 中 1\n", text)
+        b_ev = os.path.join(self.b, "net_events_in.txt")
+        self.assertTrue(wait_for(lambda: event_lines(b_ev) == ["1 A attack"]), read(b_ev))
+        time.sleep(0.3)
+        self.assertEqual(event_lines(b_ev), ["1 A attack"])
+
+    def test_settings_handshake_and_versions(self):
+        port = PORT + 6
+        write(os.path.join(self.a, "PhantomPact.ini"), "Role = Host\nPvP = On\nCoopEnemyHealth = 150\n")
+        write(os.path.join(self.b, "PhantomPact.ini"), "Role = Guest\nPvP = Off\nCoopEnemyHealth = 150\n")
+        self.start("host", "--dir", self.a, "--port", str(port), "--ini", os.path.join(self.a, "PhantomPact.ini"),
+                   "--mod-version", "1.4.0")
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(port),
+                   "--ini", os.path.join(self.b, "PhantomPact.ini"), "--mod-version", "1.3.1")
+        a_status = os.path.join(self.a, "net_status.txt")
+        self.assertTrue(wait_for(lambda: "mismatch=pvp " in read(a_status), timeout=8.0), read(a_status))
+        self.assertIn("connected=yes", read(a_status))
+        self.assertIn("version=1.4.0 partner_version=1.3.1", read(a_status))
+
+    def test_stops_on_a_stale_heartbeat_but_not_on_an_empty_one(self):
+        alive = os.path.join(self.a, "net_alive.txt")
+        write(alive, str(int(time.time())))
+        p = self.start("host", "--dir", self.a, "--port", str(PORT + 7), "--alive-file", alive, "--alive-timeout", "2")
+        time.sleep(0.5)
+        write(alive, "")                       # the mod truncates, then writes
+        time.sleep(3)
+        self.assertIsNone(p.poll(), "an empty heartbeat file stopped the relay")
+        write(alive, str(int(time.time()) - 60))
+        self.assertTrue(wait_for(lambda: p.poll() is not None))
+        self.assertIn("stopped=yes", read(os.path.join(self.a, "net_status.txt")))
+
+    @unittest.skipUnless("host" in NATIVE_ROLES, "the Python relay reports this as a Python error instead")
+    def test_a_port_in_use_is_reported(self):
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            s.bind(("0.0.0.0", PORT + 8))
+            p = self.start("host", "--dir", self.a, "--port", str(PORT + 8))
+            self.assertTrue(wait_for(lambda: p.poll() is not None))
+        self.assertIn("couldn't use UDP port", read(os.path.join(self.a, "relay_error.txt")))
+
+    # The plain loopback tests already ran on it through start().
+    test_snapshot_and_events_both_ways = None
+    test_receiving_relay_restart_resends_events = None
+    test_echo_shifts_player_only_and_echoes_events = None
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 -- How your partner is doing, as short tips (the game's ink-bar tip, see status.lua): partner down, partner back,
--- partner's health getting low, partner watching a cutscene, and the two of you far apart in the same area.
+-- partner watching a cutscene, and the two of you far apart in the same area.
 -- (From appdoze's PR #5, without its regroup teleport, which stays deferred: see docs/reviews.)
 -- Each player's death and respawn stay their own game's; there is no revive. Spectating is in coop.lua.
 
@@ -11,9 +11,8 @@ return function(api)
     local POLL_S = 0.5
     local FRESH_S = 3.0             -- a partner position older than this is stale
     local FAR_CM = 15000            -- "far apart" above 150 m (same area)
-    local LOW = { 0.5, 0.25 }       -- partner health tips at these fractions
 
-    local partner = { down = false, zeroReads = 0, lowShown = 1, far = false, cine = false }
+    local partner = { down = false, zeroReads = 0, far = false, cine = false }
     local nextPoll = 0
 
     local function tip(key, text)
@@ -50,7 +49,6 @@ return function(api)
         partner.zeroReads = 0
         if partner.down then
             partner.down = false
-            partner.lowShown = 1
             tip("partner", "your partner is back.")
             return
         end
@@ -58,17 +56,6 @@ return function(api)
             partner.cine = t.Cine
             if t.Cine then
                 tip("cine", "your partner is watching a cutscene.")
-            end
-        end
-        local frac = t.Hp / t.MaxHp
-        if frac >= 0.75 then
-            partner.lowShown = 1
-        end
-        for _, th in ipairs(LOW) do
-            if frac <= th and partner.lowShown > th then
-                partner.lowShown = th
-                tip("partnerhp", string.format("your partner's health: %d%%.", math.floor(frac * 100 + 0.5)))
-                break
             end
         end
         -- Far apart in the same area: one tip each time you drift apart.

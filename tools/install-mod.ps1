@@ -44,6 +44,12 @@ Copy-Item (Join-Path $source '*') $target -Recurse -Force
 # The relay lives in the mod folder; autostart.lua starts it from there (PhantomPact.ini, Role = Host/Guest).
 New-Item -ItemType Directory -Force (Join-Path $target 'relay') | Out-Null
 Copy-Item (Join-Path $PSScriptRoot '..\net\pbzcoop_net.py'), (Join-Path $PSScriptRoot '..\net\steam_transport.py') (Join-Path $target 'relay') -Force
+# The built-in relay, if tools\build-native.ps1 has been run; without it the mod falls back to Python.
+$nativeDll = Join-Path $PSScriptRoot '..\native\build\main.dll'
+if (Test-Path $nativeDll) {
+    New-Item -ItemType Directory -Force (Join-Path $target 'dlls') | Out-Null
+    Copy-Item $nativeDll (Join-Path $target 'dlls') -Force
+}
 # This is the developer install (the tests send "eval" through cmd.txt): turn eval on. The release zip has no dev.txt.
 Set-Content (Join-Path $target 'dev.txt') 'eval enabled for development (tools\install-mod.ps1)' -Encoding ascii
 

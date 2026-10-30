@@ -1,9 +1,11 @@
--- Phantom Pact auto-start: reads PhantomPact.ini, starts the network relay (net/pbzcoop_net.py, with the
--- Python bundled in PBZCoop\python, else the player's own) when the game starts, and turns online sync on once the player is in gameplay.
--- Players only edit the ini; nothing to run by hand.
+-- Phantom Pact auto-start: reads PhantomPact.ini, starts the network relay when the game starts, and turns online
+-- sync on once the player is in gameplay. Players only edit the ini; nothing to run by hand.
+--
+-- The relay is the built-in one (dlls\main.dll, native/ in the repo), which UE4SS loads with the game. If that isn't
+-- running (an antivirus took the DLL, say) the Python relay is the fallback, with the player's own Python.
 --
 -- The relay stops by itself when the game closes: this file rewrites net_alive.txt every few seconds and the
--- relay exits once it goes stale (--alive-file).
+-- relay exits once it goes stale.
 
 return function(api)
     local log, valid, getPlayer1 = api.log, api.valid, api.getPlayer1
@@ -12,6 +14,7 @@ return function(api)
 
     local ALIVE_EVERY_MS = 3000
     local RELAY_FRESH_S = 5       -- a relay status this recent means a relay is already running
+    local NATIVE_FRESH_S = 10     -- main.dll rewrites net_native.txt every 2 s while it's loaded
     local placeholder = "PUT-THE-HOSTS-TAILSCALE-IP-HERE"
 
     -- Game builds this version was tested on, by PBZ.exe size (instant to read; hashing a 500 MB exe isn't).
@@ -117,7 +120,30 @@ return function(api)
         return t ~= nil and os.time() - t <= RELAY_FRESH_S
     end
 
-    local function startRelay()
+    -- Lua can't call into main.dll: it watches for net_start.txt, which appears whole thanks to the rename. The DLL
+    -- reads the Secret and the settings both players should share from the ini itself.
+    local function nativeReady()
+        local t = tonumber(((readText(modDir() .. "net_native.txt") or ""):match("ready (%d+)")))
+        return t ~= nil and os.time() - t <= NATIVE_FRESH_S
+    end
+
+    local function startNative()
+        local lines = { "role=" .. modRole, "port=" .. port, "transport=" .. (steam and "steam" or "udp"),
+            "version=" .. (api.version or "?") }
+        if modRole == "client" and hostAddress ~= "" then
+            lines[#lines + 1] = "peer=" .. hostAddress
+        end
+        local path = modDir() .. "net_start.txt"
+        writeText(path .. ".tmp", table.concat(lines, "\n") .. "\n")
+        os.remove(path)
+        if not os.rename(path .. ".tmp", path) then
+            log("Couldn't start the built-in relay: net_start.txt can't be written in " .. modDir())
+            return false
+        end
+        return true
+    end
+
+    local function startPython()
         local relay = modRoot() .. "relay/pbzcoop_net.py"
         local f = io.open(relay, "r")
         if not f then
@@ -135,25 +161,23 @@ return function(api)
         if modRole == "client" and hostAddress ~= "" then
             args = args .. ' --peer "' .. hostAddress .. '"'
         end
-        -- pythonw: Python without a console window. The release zip carries Python's own embeddable build in
-        -- PBZCoop\python, so players install nothing; without it, the player's Python (the py launcher from
-        -- python.org installs, else pythonw on PATH). "start" returns at once, so the game doesn't wait.
-        local bundled = (modRoot() .. "python/pythonw.exe"):gsub("/", "\\")
-        local cmd
-        local f = io.open(bundled, "rb")
-        local which = f and "bundled Python" or "your Python"
-        if f then
-            f:close()
-            cmd = string.format('start "" "%s" %s', bundled, args)
-        else
-            cmd = string.format('where pyw >nul 2>nul && (start "" pyw -3 %s) || (where pythonw >nul 2>nul && start "" pythonw %s)',
-                args, args)
-        end
-        local ok = os.execute(cmd)
-        if not ok then
-            log("Couldn't start the relay: Python wasn't found. Reinstall Phantom Pact (the zip includes it) and restart the game.")
+        -- pythonw: Python without a console window. The py launcher comes with python.org installs; plain pythonw
+        -- covers the rest. "start" returns at once, so the game doesn't wait.
+        local cmd = string.format('where pyw >nul 2>nul && (start "" pyw -3 %s) || (where pythonw >nul 2>nul && start "" pythonw %s)',
+            args, args)
+        if not os.execute(cmd) then
+            log("Couldn't start the relay: dlls\\main.dll isn't running (reinstall Phantom Pact and check your antivirus didn't remove it).")
             return false
         end
+        return true
+    end
+
+    local function startRelay()
+        local native = nativeReady()
+        if not (native and startNative() or not native and startPython()) then
+            return false
+        end
+        local which = native and "built-in relay" or "your Python"
         local joining = modRole ~= "client" and ""
             or hostAddress ~= "" and (", joining " .. hostAddress)
             or ", looking for a Steam friend who's hosting"
