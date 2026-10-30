@@ -418,6 +418,22 @@ class SecretLoopback(RelayLoopback):
                                  and "rejected=0 " not in read(os.path.join(self.a, "net_status.txt"))))
         self.assertEqual(read(os.path.join(self.b, "net_in.txt")), "")
 
+    def test_allow_any_address_from_the_ini(self):
+        relay = load_relay_module()
+        seen, real = [], relay.Relay
+        relay.Relay = lambda *a, **k: (seen.append(k.get("allow")), real(*a, **k))[1]
+        for value, expected in (("On", "any"), ("Off", "partner")):
+            ini = os.path.join(self.a, "PhantomPact.ini")
+            write(ini, f"Role = Host\nAllowAnyAddress = {value}\n")
+            argv = sys.argv
+            sys.argv = ["pbzcoop_net.py", "host", "--dir", self.a, "--ini", ini, "--seconds", "0.2",
+                        "--port", "47920"]
+            try:
+                relay.main()
+            finally:
+                sys.argv = argv
+            self.assertEqual(seen[-1], expected, value)
+
     # The plain loopback tests don't apply to this class.
     test_snapshot_and_events_both_ways = None
     test_receiving_relay_restart_resends_events = None

@@ -711,6 +711,9 @@ def main():
         return
 
     ini = read_ini(args.ini) if args.ini else {}
+    if ini.get("allowanyaddress", "off").lower() in ("on", "yes", "true", "1"):
+        # A virtual LAN with unusual addresses (UU Accelerator's multiplayer, ZeroTier...): the player opened it.
+        args.allow = "any"
     secret = ini.get("secret", "")
     if secret.upper().startswith("PUT-") or secret.lower() in ("", "off", "none"):
         secret = None

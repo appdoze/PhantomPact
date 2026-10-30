@@ -103,7 +103,8 @@ real respawn:
 Raised by appdoze (issue #1 / PR #2) and reworked from their code:
 
 - **Sender filter.** The host relay only takes packets from addresses a partner can have: Tailscale, home networks,
-  this PC, and Hamachi/Radmin. `--allow any` lifts the filter. A guest only listens to its host's exact address
+  this PC, and Hamachi/Radmin. `AllowAnyAddress = On` in the ini (or `--allow any`) lifts the filter, for virtual
+  LANs with other address ranges (UU Accelerator's multiplayer, ZeroTier). A guest only listens to its host's exact address
   and port. Refused packets count as `filtered=` in net_status.txt.
 - **Optional `Secret`**, the same on both PCs. Every packet is HMAC-signed with a scrypt-stretched key, and the
   relay refuses a packet when:
