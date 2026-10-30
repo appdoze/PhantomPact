@@ -27,7 +27,7 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 
 ## Quick start
 
-1. Install [UE4SS for Phantom Blade Zero](https://www.nexusmods.com/phantombladezero/mods/5) and [Tailscale](https://tailscale.com) (both players). Python comes with the mod.
+1. Install [UE4SS for Phantom Blade Zero](https://www.nexusmods.com/phantombladezero/mods/5) and [Tailscale](https://tailscale.com) (both players). The GitHub zip brings its own Python; the Nexus one needs [Python 3](https://www.python.org/downloads/) installed.
 2. Extract the release zip into the game's `PBZ` folder.
 3. In `platform\steam\ue4ss\Mods\PBZCoop\PhantomPact.ini`: host sets `Role = Host`, guest sets `HostAddress` to
    the host's Tailscale IP.
@@ -54,7 +54,7 @@ Early release, 2 players. Tailscale or any virtual LAN; Steam joining is in beta
 | [tools/install-mod.ps1](tools/install-mod.ps1) | Installs the mod into the game's UE4SS `Mods` folder (finds the game through Steam) |
 | [tools/pbz-e2e.ps1](tools/pbz-e2e.ps1) | End-to-end test: two copies of the game on one PC, PASS/FAIL per feature; `-Auto` tests the player setup (ini, self-started relays) |
 | [tools/pbz-selftest.ps1](tools/pbz-selftest.ps1) | Starts two copies with `-allowmultipleinstances` plus relays; `-Stop` |
-| [tools/make-release.ps1](tools/make-release.ps1) | Builds `dist\PhantomPact-<version>.zip`, with Python's signed embeddable build (pinned by hash) in `PBZCoop\python` |
+| [tools/make-release.ps1](tools/make-release.ps1) | Builds `dist\PhantomPact-<version>.zip`, with Python's signed embeddable build (pinned by hash) in `PBZCoop\python`; `-NoPython` builds the Nexus zip (Nexus quarantines the .exe files) |
 | [docs/COOP_GUIDE.md](docs/COOP_GUIDE.md) | What syncs and how: protocol, enemy matching, tests and results |
 | [docs/RECON_NOTES.md](docs/RECON_NOTES.md) | Classes, functions and data tables found in the game |
 

@@ -151,7 +151,7 @@ return function(api)
         end
         local ok = os.execute(cmd)
         if not ok then
-            log("Couldn't start the relay: Python wasn't found. Reinstall Phantom Pact (the zip includes it) and restart the game.")
+            log("Couldn't start the relay: Python wasn't found. Install Python 3 from python.org (just click Install Now) and restart the game.")
             return false
         end
         local joining = modRole ~= "client" and ""

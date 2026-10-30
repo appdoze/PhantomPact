@@ -13,9 +13,9 @@ https://github.com/yhsharaf/PhantomPact/issues, with what happened (host or gues
 
 1. **Phantom Blade Zero** on Steam.
 2. **UE4SS for Phantom Blade Zero** by Vercadi (Nexus Mods), installed in `PBZ\platform\steam`.
-3. **Tailscale** (tailscale.com), both signed in to the same network.
-
-No Python install needed: the mod brings its own (Python's official portable build, in `PBZCoop\python`).
+3. **Python 3** from python.org (just click Install Now). Not needed with the GitHub download, which brings its own
+   in `PBZCoop\python`; the Nexus download doesn't include it.
+4. **Tailscale** (tailscale.com), both signed in to the same network.
 
 ## Install (both players)
 
@@ -49,7 +49,7 @@ The UE4SS console shows `Phantom Pact Host: co-op on` (or Guest), and
 
 - **Partner compass:** a silver seal on a line at the top shows which way your partner is. Turn it off with
   `PartnerCompass = Off`.
-- **Tips:** short messages when your partner connects, drops, goes down, gets low or wanders far off.
+- **Tips:** short messages when your partner connects, drops, goes down or wanders far off.
 - **When you die:** after a few seconds the camera follows your partner until you respawn.
 
 ## Co-op difficulty
@@ -86,8 +86,7 @@ Not in PvP yet: executions (posture break only staggers).
 
 - **No "co-op on" line:** check `PhantomPact.ini` (Role, and HostAddress for the guest). The UE4SS log says what's
   missing.
-- **"Python wasn't found":** the `PBZCoop\python` folder is missing (some antivirus apps move it away).
-  Extract the zip again, or install Python 3 from python.org, which the mod then uses instead.
+- **"Python wasn't found":** install Python 3 from python.org (just click Install Now), then restart the game.
 - **`connected=no`:** both on Tailscale? The right IP in the guest's `HostAddress`? Windows Firewall must allow
   Python on private networks (Windows asks the first time the host plays; click Allow).
 - **No `[PBZCoop] Loaded` line at all:** UE4SS isn't installed in `PBZ\platform\steam`, or the mod folder isn't at
