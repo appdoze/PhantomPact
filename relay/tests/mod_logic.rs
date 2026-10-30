@@ -22,6 +22,9 @@ fn load(script: &str, files: &Path) -> Lua {
     lua.globals().set("MOD_ROOT", lua_path(&mod_dir())).unwrap();
     lua.globals().set("MOD_DIR", lua_path(files)).unwrap();
     lua.load(STUBS).exec().unwrap();
+    if script.is_empty() {
+        return lua; // stubs only: the test loads what it needs
+    }
     let src = std::fs::read_to_string(mod_dir().join("Scripts").join(script)).unwrap();
     {
         let f: mlua::Function = lua.load(&src).set_name(script).eval().unwrap();
@@ -32,7 +35,7 @@ fn load(script: &str, files: &Path) -> Lua {
 }
 
 const STUBS: &str = r#"
-tips, logs, teleports = {}, {}, {}
+tips, logs, teleports, sent = {}, {}, {}, {}
 objects = {}                         -- FindFirstOf results by class
 function FindFirstOf(cls) return objects[cls] end
 function FindAllOf(cls) return {} end
@@ -48,7 +51,10 @@ api = {
     log = function(s) logs[#logs + 1] = s end,
     valid = function(o) return o ~= nil end,
     game = { getHealth = function() return hp[1], hp[2] end },
-    coop = { net = net, handlers = {}, extraTicks = {}, sendEvent = function() end },
+    coop = { net = net, handlers = {}, extraTicks = {}, sendEvent = function(k, ...)
+        local args = { ... }
+        sent[#sent + 1] = k .. (#args > 0 and (" " .. table.concat(args, " ")) or "")
+    end },
     modRoot = function() return MOD_ROOT end,
     modDir = function() return MOD_DIR end,
     getPlayer1 = function() return nil, pawn end,
@@ -83,14 +89,119 @@ fn shared_world_objects_go_to_the_ledger_once_and_gates_tell_the_player() {
          A PBZ_Xigu_WP-BP_Chest_C_UAID_60CF8480990963A302_1103301003\n"
     );
     let tips: Vec<String> = lua.globals().get("tips").unwrap();
-    assert_eq!(tips.len(), 2, "gate and shortcut tips, none for the chest (shown open live): {tips:?}");
-    assert!(tips[0].contains("opened a gate"), "{tips:?}");
-    assert!(tips[1].contains("opened a shortcut"), "{tips:?}");
+    assert_eq!(tips.len(), 1, "only the kick stone has no live opening: {tips:?}");
+    assert!(tips[0].contains("opened a shortcut"), "{tips:?}");
 
-    // A new session reads the ledger back: the chest waits for its area, the rest needs nothing live.
+    // A new session reads the ledger back; once the gate's area is loaded it opens through its own function and
+    // leaves the list (the game records it); the chest is shown open and stays for pbzsave coop-sync.
     let lua = load("sync.lua", &dir);
-    let waiting: i64 = lua.load("local n = 0 for _ in pairs(M.pending) do n = n + 1 end return n").eval().unwrap();
-    assert_eq!(waiting, 3);
+    let out: String = lua
+        .load(
+            r#"
+            local opened = {}
+            local function actor(name) return {
+                IsValid = function() return true end, CurSwitchState = false,
+                OpenDoorNoAnim = function() opened[#opened + 1] = name end,
+                ["Change Switch State"] = function() opened[#opened + 1] = name end } end
+            objects.PBZLevelActorManager = {
+                ActorSaveData = { ForEach = function() end },
+                HasSaveDataByActorID = function(_, id) return false end,
+                GetActorByID = function(_, id) return actor(id) end,
+            }
+            function StaticFindObject(p) return { path = p } end
+            net.enabled = true
+            for _ = 1, 120 do api.coop.extraTicks.sync() end
+            local n = 0 for _ in pairs(M.pending) do n = n + 1 end
+            return #opened .. " opened, " .. n .. " pending: " .. table.concat(opened, ", ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(out.starts_with("2 opened, 1 pending"), "gate opened (recorded), kick stone left to pbzsave, chest shown: {out}");
+    assert!(out.contains("Block_Gate") && out.contains("Chest"), "{out}");
+}
+
+#[test]
+fn partner_montages_play_on_the_ghost_and_replace_ability_replays() {
+    let lua = load("", &scratch("moves"));
+    let out: String = lua
+        .load(
+            r#"
+            local played, abilities = {}, {}
+            api.coop.handlers.M = function(rest) abilities[#abilities + 1] = rest end
+            local moves = dofile(MOD_ROOT .. "Scripts/moves.lua")(api)
+            local function anim(rec) return { IsValid = function() return true end,
+                Montage_Play = function(_, m, rate, kind, start, stopAll) rec[#rec + 1] = m.path .. "@" .. string.format("%.2f", start) end } end
+            net.ghost = { IsValid = function() return true end, Mesh = { GetAnimInstance = function() return anim(played) end } }
+            net.rttMs = 100
+            function StaticFindObject(p) if p:find("Missing") then return nil end return { IsValid = function() return true end, path = p } end
+            local U, M = api.coop.handlers.U, api.coop.handlers.M
+            M("1 GA_Hun_Light_A 90")                                                -- before any montage: replayed
+            U("/PBZCombatAsset/Hun/AM_Hun_Tang_StanceEnter.AM_Hun_Tang_StanceEnter 0.20")
+            M("2 GA_Hun_Light_A 90")                                                -- now montages lead
+            U("/Missing/AM_X.AM_X 0")                                               -- not loadable here
+            U("bad path 1")
+            U("/Ok/AM_Y.AM_Y nan")
+            -- sender: our own montage changes, then restarts
+            local cur = { path = "/PBZCombatAsset/Hun/AM_Hun_Double_Exec.AM_Hun_Double_Exec", pos = 0.1 }
+            local mont = { IsValid = function() return true end, GetAddress = function() return cur.path end,
+                GetFullName = function() return "AnimMontage " .. cur.path end }
+            pawn.Mesh = { GetAnimInstance = function() return { IsValid = function() return true end,
+                GetCurrentActiveMontage = function() return mont end,
+                Montage_GetPosition = function() return cur.pos end } end }
+            net.enabled = true
+            local tick = api.coop.extraTicks.moves
+            tick() cur.pos = 0.5 tick() cur.pos = 0.0 tick()
+            return table.concat(played, " ") .. " | abilities " .. #abilities .. " | sent " .. table.concat(sent, " ; ")
+                .. " | failed " .. moves.failed
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(out.starts_with("/PBZCombatAsset/Hun/AM_Hun_Tang_StanceEnter.AM_Hun_Tang_StanceEnter@0.25 | abilities 1"), "{out}");
+    assert!(out.contains("sent U /PBZCombatAsset/Hun/AM_Hun_Double_Exec.AM_Hun_Double_Exec 0.10 ; U /PBZCombatAsset/Hun/AM_Hun_Double_Exec.AM_Hun_Double_Exec 0.00"),
+        "sent on start and on restart, not while playing: {out}");
+    assert!(out.ends_with("failed 1"), "{out}");
+}
+
+#[test]
+fn revive_brings_the_downed_partner_back_and_dialogue_lines_become_tips() {
+    let lua = load("partner.lua", &scratch("revive"));
+    let out: String = lua
+        .load(
+            r#"
+            local after = {}
+            api.game.after = function(s, f) after[#after + 1] = f end
+            objects.PerformanceSystemSubsystem = { TeleportToTargetPoint = function(self, t, level)
+                teleports[#teleports + 1] = level end }
+            local tick = api.coop.extraTicks.partner
+            local function check() for _ = 1, 30 do tick() end end
+            -- partner down: the regroup key sends a revive instead
+            net.target = { X = 0, Y = 0, Z = 0, Yaw = 0, Hp = 0, MaxHp = 100, Map = "PBZ_Xigu_WP" }
+            net.targetAt = os.clock()
+            M.regroup()
+            -- the other side: revive received while down; back on its feet -> teleported to the reviver
+            api.coop.handlers.Y()
+            net.target = { X = 500, Y = 0, Z = 0, Yaw = 0, Hp = 100, MaxHp = 100, Map = "PBZ_Xigu_WP" }
+            hp[1] = 0 net.targetAt = os.clock() check() check()
+            hp[1] = 100 net.targetAt = os.clock() check()
+            for _, f in ipairs(after) do f() end
+            -- dialogue: a visible widget's line is sent once; a received line becomes a tip
+            local line = "Hun: The blade remembers."
+            function FindAllOf(cls) if cls == "PBZEventPipelineDialogWidget" then return { { IsValid = function() return true end,
+                IsVisible = function() return true end, DialogueData = { Text = { ToString = function() return line end } } } } end return {} end
+            check() check()
+            api.coop.handlers.T("Soul: Who goes there?")
+            return table.concat(sent, ";") .. " | teleports " .. table.concat(teleports, ",") .. " | " .. table.concat(tips, " / ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert!(out.starts_with("Y;T Hun: The blade remembers. | teleports PBZ_Xigu_WP |"), "{out}");
+    assert!(out.contains("revive sent"), "{out}");
+    assert!(out.contains("your partner is reviving you"), "{out}");
+    assert!(out.contains("revived: back at your partner's side"), "{out}");
+    assert!(out.contains("(partner's dialogue) Soul: Who goes there?"), "{out}");
 }
 
 #[test]

@@ -16,13 +16,14 @@
 --                          kicked down, blocked path broken, cage opened... (the game's LevelActorManager key)
 --
 -- World objects live in streamed-in levels, so the partner's are kept in a pending list and applied when that
--- actor is loaded: a rubbish pile through its own BeginDestroyRubbish (which also records it), a chest through its
--- own "Change Switch State" (shown open), a fog gate through its own OpenByMobScript (the call the mod already uses
--- at boss arenas). Other gates, doors and shortcuts have no function verified in game yet, so
--- they aren't changed in the running game (regroup gets you past one your partner opened). Every shared object
--- goes to shared_world.txt; "pbzsave coop-sync" writes the game's own record for it into the save with the game
--- closed, so it is open from the next load. Chests are shown open again each session until then. The contents of
--- a chest stay with the player who opened it.
+-- actor is loaded, through the object's own function (each checked in game):
+--   rubbish pile BeginDestroyRubbish, gate / double door OpenDoorNoAnim, landscape door DoPositiveAction, ground
+--   blocker Break, rope ManualFadeRope: opened and recorded by the game itself;
+--   chest "Change Switch State", fog gate OpenByMobScript: shown open, not recorded.
+-- Kick-down stones and cages only open through the player's own interaction, so they aren't changed live (regroup
+-- gets you past one your partner opened). Every shared object goes to shared_world.txt; "pbzsave coop-sync" writes
+-- the game's own record into the save with the game closed, so the rest is open from the next load. The contents
+-- of a chest stay with the player who opened it (new equipment is shared separately, J).
 --
 -- Only changes made while sync is on are shared: when sync starts, the current state is the baseline, so joining a
 -- partner never pushes either player's whole story onto the other. While a batch is applied the game's save veto
@@ -46,12 +47,13 @@ return function(api)
         BP_Rubbish_C = { what = "rubbish pile", live = "rubbish" },
         BP_Rubbish_b_C = { what = "rubbish pile" },
         BP_FogDoor_C = { what = "fog gate", live = "fog" },
-        BP_Block_Gate_C = { what = "gate" },
-        BP_DoubleDoor_G_C = { what = "door" },
-        BP_MoveableStuff_CollisionLandscape_door_C = { what = "door" },
+        BP_Block_Gate_C = { what = "gate", live = "door" },
+        BP_DoubleDoor_G_C = { what = "door", live = "door" },
+        BP_MoveableStuff_CollisionLandscape_door_C = { what = "door", live = "landscape" },
+        BP_MoveableStuff_CollisionLandscape_C = { what = "door", live = "landscape" },
         BP_KickStone_C = { what = "shortcut" },
-        BP_GroundBlocker_C = { what = "blocked path" },
-        BP_RopeConnection_C = { what = "rope" },
+        BP_GroundBlocker_C = { what = "blocked path", live = "blocker" },
+        BP_RopeConnection_C = { what = "rope", live = "rope" },
         BP_NarrativeCage_C = { what = "cage" },
     }
 
@@ -247,43 +249,41 @@ return function(api)
         return state
     end
 
-    -- The partner's chests / rubbish piles whose actor is loaded now. Recorded ones leave the list.
+    -- How each live object is opened, and whether the game records it by itself (then it leaves the pending list).
+    local OPEN = {
+        rubbish = function(a) if not a.bDestroyed then a:BeginDestroyRubbish() end return true end,
+        door = function(a) a:OpenDoorNoAnim() return true end,
+        landscape = function(a) a:DoPositiveAction() return true end,
+        blocker = function(a) a:Break() return true end,
+        rope = function(a) a:ManualFadeRope() return true end,
+        chest = function(a) if not a.CurSwitchState then a["Change Switch State"]() end return false end,
+        fog = function(a) a:OpenByMobScript() return false end,
+    }
+
+    -- The partner's world objects whose actor is loaded now. Recorded ones leave the list.
     local function applyPending()
         if next(sync.pending) == nil then
             return
         end
         local lam = first("PBZLevelActorManager")
-        if not lam then
+        local actorClassObj = StaticFindObject("/Script/Engine.Actor")
+        if not (lam and valid(actorClassObj)) then
             return
         end
-        local classes = {}
         for id in pairs(sync.pending) do
             local cn = actorClass(id)
-            if classes[cn] == nil then
-                local inst = first(cn)
-                classes[cn] = inst and inst:GetClass() or false
-            end
             if lam:HasSaveDataByActorID(FName(id)) or not (cn and SHARED[cn].live) then
                 sync.pending[id] = nil      -- recorded already, or nothing to do live (pbzsave coop-sync records it)
-            elseif classes[cn] and not sync.shown[id] then
-                local a = lam:GetActorByID(FName(id), classes[cn])
+            elseif not sync.shown[id] then
+                local a = lam:GetActorByID(FName(id), actorClassObj)
                 if valid(a) then
                     if sync.known then
                         sync.known.actors[id] = true     -- shown because of the partner: don't send it back
                     end
-                    if SHARED[cn].live == "rubbish" then
-                        if not a.bDestroyed then
-                            a:BeginDestroyRubbish()
-                        end
-                        sync.pending[id] = nil
-                    elseif SHARED[cn].live == "fog" then
-                        a:OpenByMobScript()
-                        sync.shown[id] = true
+                    if OPEN[SHARED[cn].live](a) then
+                        sync.pending[id] = nil      -- the game recorded it
                     else
-                        if not a.CurSwitchState then
-                            a["Change Switch State"]()
-                        end
-                        sync.shown[id] = true
+                        sync.shown[id] = true       -- shown open this session; pbzsave coop-sync records it
                     end
                     log("Shared progress: partner's " .. SHARED[cn].what .. " " .. id)
                 end

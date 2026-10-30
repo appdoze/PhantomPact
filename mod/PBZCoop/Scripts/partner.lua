@@ -4,10 +4,15 @@
 -- partner with the game's own teleport (PerformanceSystemSubsystem.TeleportToTargetPoint, the one that takes you
 -- from one area to another), so it works across areas and gets you past a gate only your partner has opened.
 --
+-- Revive: while your partner is down, the regroup key revives them to your side ("Y" event): once they're back on
+-- their feet (each player's death and respawn stay their own game's), they're teleported straight to you.
+--
+-- Dialogue: lines your character hears in a conversation (the game's PBZEventPipelineDialogWidget, its
+-- DialogueData.Text) are sent as "T <text>" and shown to your partner as tips.
+--
 -- Tips (the game's ink-bar tip, see status.lua): partner down, partner back, partner's health getting low,
 -- partner watching a cutscene, the two of you far apart, and after you respawn, a reminder that regroup takes you
--- back. Each player's death and
--- respawn stay their own game's: there is no revive.
+-- back.
 
 return function(api)
     local log, valid, game = api.log, api.valid, api.game
@@ -21,6 +26,10 @@ return function(api)
     local ABOVE_CM = 50
     local FAR_CM = 15000            -- "far apart" hint above 150 m (same area)
     local LOW = { 0.5, 0.25 }       -- partner health tips at these fractions
+    local REVIVE_WINDOW_S = 180     -- a revive request waits this long for the downed player to be back
+    local REVIVE_DELAY_S = 1.5      -- after getting up, before the teleport (the respawn settles first)
+    local DIALOGUE_TICKS = 15       -- ~0.25 s between dialogue checks
+    local DIALOGUE_MAX = 200        -- characters of a line sent
 
     local partner = {
         key = "F5",
@@ -32,6 +41,8 @@ return function(api)
         lowShown = 1,
         far = false,
         partnerCine = false,
+        reviveAt = nil,             -- when the partner asked to revive us (os.clock)
+        lastLine = nil,             -- last dialogue line sent
     }
     local ticks = 0
 
@@ -47,14 +58,16 @@ return function(api)
         return net.enabled and net.target ~= nil and net.targetAt ~= nil and os.clock() - net.targetAt <= FRESH_S
     end
 
-    function partner.regroup()
+    function partner.regroup(force)
         if not fresh() then
             tip("regroup", "regroup: no position from your partner yet (connected?).")
             return
         end
         local t = net.target
         if t.MaxHp and t.MaxHp > 0 and t.Hp and t.Hp <= 0 then
-            tip("regroup", "regroup: your partner is down; regroup once they're back.")
+            -- Partner down: the same key revives them to your side.
+            coop.sendEvent("Y")
+            tip("regroup", "revive sent: your partner comes back to you once they're on their feet.")
             return
         end
         if not t.Map or t.Map == "?" then
@@ -62,7 +75,7 @@ return function(api)
             return
         end
         local now = os.clock()
-        if now - partner.lastRegroup < COOLDOWN_S then
+        if not force and now - partner.lastRegroup < COOLDOWN_S then
             tip("regroup", "regroup: wait a few seconds.")
             return
         end
@@ -159,15 +172,59 @@ return function(api)
             partner.selfZero = 0
             if partner.selfDown then
                 partner.selfDown = false
-                if fresh() then
+                if partner.reviveAt and os.clock() - partner.reviveAt <= REVIVE_WINDOW_S and game.after then
+                    partner.reviveAt = nil
+                    game.after(REVIVE_DELAY_S, function()
+                        ExecuteInGameThread(function()
+                            tip("self", "revived: back at your partner's side.")
+                            partner.regroup(true)
+                        end)
+                    end)
+                elseif fresh() then
                     tip("self", "you're back: " .. partner.key .. " regroups you with your partner.")
                 end
             end
         end
     end
 
+    coop.handlers.Y = function()
+        partner.reviveAt = os.clock()
+        tip("revive", "your partner is reviving you: you'll return to them when you're back on your feet.")
+    end
+
+    -- Dialogue: the line in a visible dialogue widget, sent once each.
+    local function watchDialogue()
+        local line
+        for _, w in ipairs(FindAllOf("PBZEventPipelineDialogWidget") or {}) do
+            if valid(w) and w:IsVisible() then
+                local ok, text = pcall(function() return w.DialogueData.Text:ToString() end)
+                if ok and text and text:match("%S") then
+                    line = text
+                    break
+                end
+            end
+        end
+        if line and line ~= partner.lastLine then
+            local clean = line:gsub("[%c]+", " "):sub(1, DIALOGUE_MAX)
+            coop.sendEvent("T", clean)
+        end
+        partner.lastLine = line
+    end
+
+    coop.handlers.T = function(text)
+        if text and text:match("%S") then
+            tip("dialogue", "(partner's dialogue) " .. text:sub(1, DIALOGUE_MAX))
+        end
+    end
+
     coop.extraTicks.partner = function()
         ticks = ticks + 1
+        if ticks % DIALOGUE_TICKS == 0 and net.enabled then
+            local ok, err = pcall(watchDialogue)
+            if not ok then
+                log("dialogue check failed: " .. tostring(err))
+            end
+        end
         if ticks % POLL_TICKS == 0 and net.enabled then
             local ok, err = pcall(function()
                 watchPartner()

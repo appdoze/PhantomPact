@@ -68,15 +68,19 @@ the client logic runs on the echoed data, so host and client code both run in on
 
 | Shared progress (`sync.lua`) | Quests, bells, enemy-group rewards, challenge points, codex entries, equipment, chests, rubbish piles, gates, doors and shortcuts (`Q L G N X J A` events). Chests, rubbish piles and fog gates change live; other gates, doors and shortcuts are written to `shared_world.txt` for `pbzsave coop-sync` (open from the next load) | sync.lua ran in game with a fake network: every scan (79 quests, 192 bells, 23 challenge points, 175 codex entries, 70 world objects, 150 equipment, 19-24 ms), no false events, every receive handler; not yet in a live co-op session |
 | Equipment (`J`) | New accessories, medicine, weapons, Phantom Edge weapons (backpack `Accessories` / `MedicineInfos` / `MainWeaponInfos` / `ShaqiWeaponInfos`) go to the partner through `PushAccessoryToInventory`, `PushMedicineToInventory`, `AddWeaponItem`; unknown ids are refused by the backpack and reported as failed | The three calls ran in game (owned ids: no duplicate; unknown id: nothing added) |
+| Partner's moves as montages (`moves.lua`, `U`) | The montage your character plays (`AnimInstance:GetCurrentActiveMontage`, position) is sent when it starts or restarts; the ghost plays it with `Montage_Play` from that position plus half the ping. Ability replays (`M`) are used only until the first montage arrives, and always in PvP | In game: guard stance enter/exit, a Double Blade execution and a Phantom Edge skill played on a spawned ghost; the full loop (player's montage detected once, sent, played on a ghost at 0.03 s) ran with moves.lua |
+| Gates, doors, ropes, blocked paths (`A`, live) | When the object is loaded: `OpenDoorNoAnim` (block gate, double door), `DoPositiveAction` (landscape door), `Break` (ground blocker), `ManualFadeRope` (rope); each is recorded by the game itself | Each ran in game on an unopened one (XiGu rope, Fujizhilin landscape door and blocker, Pangzhen block gate): opened and recorded at once. Kick-down stone (`FinishKickStone`, `SwitchDoTrue`: flags only, the stone doesn't fall) and cage (opens only through the player's interaction) stay record-only |
+| Revive (`partner.lua`, `Y`) | While the partner is down, the regroup key sends `Y`; the downed player, once back on their feet, is teleported to the reviver (same teleport as regroup) | Offline (mod_logic tests); the teleport is verified in game |
+| Dialogue (`partner.lua`, `T`) | A visible `PBZEventPipelineDialogWidget`'s `DialogueData.Text` is sent once per line; the partner sees it as a tip | Offline (mod_logic tests); no conversation was open to check the widget in game |
 | Partner in a cutscene | `P` line's last field (`PBZLevelSequenceManager.IsInSequence`); the ghost hides and a tip says so | IsInSequence read in game; hiding tested offline |
 | Regroup (`partner.lua`, F5) | `PerformanceSystemSubsystem.TeleportToTargetPoint` to 80 cm behind the partner, in their area (`P` line: position, yaw, map) | Same call with a hand-built transform: moved the player exactly 3 m in game, and from under the map to a bell in another area |
 | Partner tips (`partner.lua`) | From the `P` line's health: down (2 checks at 0), back, 50% / 25% health; 150 m apart; your own respawn | Offline (mod_logic tests) |
 
 Not synced: enemy AI targets in the client world are its own (positions/health are pulled to the host's);
-cutscenes themselves and dialogue (each player watches their own; the partner's ghost hides meanwhile); gates,
-doors and shortcuts other than fog gates in the running game (recorded for the next load; regroup gets you past);
-lifts and other back-and-forth mechanisms; spending currency. No revive: each player's death and respawn stay in
-their own game.
+cutscenes themselves (each player watches their own; the partner's ghost hides meanwhile); dialogue choices
+(lines are shown, choices stay each player's); kick-down stones and cages in the running game (recorded for the
+next load; regroup gets you past); lifts and other back-and-forth mechanisms; spending currency. Death itself stays
+in each player's game: revive brings the downed player back to their partner after their own respawn.
 
 Not needed: time of day and weather. In game, "Animate Time Of Day" is off and random weather is off: each area
 has a fixed, designed time and weather (checked: 15:50, rain 0, snow 10, unchanged over time), so two players in
