@@ -33,6 +33,13 @@ return function(api)
     local GHOST_SPEED_PER_CM = 3.0  -- speed per cm of distance to the target
     local GHOST_ACCELERATION = 2000 -- cm/s², P1 uses 210 but the ghost must react to network updates quickly
     local GHOST_SMOOTHING = 0.35  -- sphere ghost: fraction of the remaining distance covered per tick
+    -- Dead reckoning: the ghost aims where the partner should be now, not where the last snapshot said, by
+    -- extending their recent velocity. Capped, so a stop or turn costs at most a short overshoot.
+    local PREDICT_MAX_S = 0.25    -- never extrapolate further ahead than this
+    local PREDICT_MAX_CM = 300    -- nor further than this
+    local PREDICT_MIN_SPEED = 30  -- cm/s; slower counts as standing (no prediction)
+    local PREDICT_MAX_SPEED = 2500 -- cm/s; faster between two snapshots is a teleport, not movement
+    local PREDICT_BLEND = 0.5     -- weight of the newest velocity sample (smooths jitter)
     local ENEMY_RADIUS_CM = 6000  -- host shares enemies within this distance of its player
     local ENEMY_SNAP_CM = 400     -- client teleports a mirrored enemy that is further than this from the host's
     local ENEMY_MATCH_CM = 2000   -- client: a same-class enemy this close stands in for a host enemy with another id
@@ -282,6 +289,18 @@ return function(api)
         end
         local cur = net.ghost:K2_GetActorLocation()
         local t = net.target
+        local v = net.vel
+        if v and net.targetAt and v.X * v.X + v.Y * v.Y >= PREDICT_MIN_SPEED * PREDICT_MIN_SPEED then
+            -- How old the partner's position is: time since it arrived plus its trip here (half the round trip
+            -- the relay measures, kept in net.rttMs by the status reader).
+            local ahead = math.min(os.clock() - net.targetAt + (net.rttMs or 0) / 2000, PREDICT_MAX_S)
+            local px, py = v.X * ahead, v.Y * ahead
+            local d = math.sqrt(px * px + py * py)
+            if d > PREDICT_MAX_CM then
+                px, py = px * PREDICT_MAX_CM / d, py * PREDICT_MAX_CM / d
+            end
+            t = { X = t.X + px, Y = t.Y + py, Z = t.Z, Yaw = t.Yaw, Speed = t.Speed }
+        end
         if net.ghostWalks then
             local dx, dy = t.X - cur.X, t.Y - cur.Y
             local dist = math.sqrt(dx * dx + dy * dy)
@@ -687,9 +706,15 @@ return function(api)
         net.seq = net.seq + 1
         if net.seq % 20 == 1 or net.localMap == nil then
             net.localMap = game.mapName and game.mapName(pawn) or "?"
+            -- The outfit we wear, so the partner's ghost of us wears it too (older versions ignore the field).
+            net.localOutfit = "-"
+            pcall(function()
+                local c = pawn:GetComponentByClass(StaticFindObject("/Script/ProjectPBZ.PBZAppearanceComponent"))
+                net.localOutfit = c:GetEffectiveOutfit():ToString()
+            end)
         end
-        local lines = { string.format("P %d %.1f %.1f %.1f %.1f %.0f %.1f %.1f %s",
-            net.seq, loc.X, loc.Y, loc.Z, yaw, speed, hp or 0, maxhp or 0, net.localMap) }
+        local lines = { string.format("P %d %.1f %.1f %.1f %.1f %.0f %.1f %.1f %s %s",
+            net.seq, loc.X, loc.Y, loc.Z, yaw, speed, hp or 0, maxhp or 0, net.localMap, net.localOutfit or "-") }
         if isHost() then
             for _, l in ipairs(enemySnapshotLines(loc)) do
                 lines[#lines + 1] = l
@@ -729,15 +754,31 @@ return function(api)
         for line in text:gmatch("[^\r\n]+") do
             local kind = line:sub(1, 1)
             if kind == "P" then
-                local seq, x, y, z, yaw, speed, hp, maxhp, map = line:match(
-                    "^P (%d+) (%S+) (%S+) (%S+) (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
+                local seq, x, y, z, yaw, speed, hp, maxhp, map, outfit = line:match(
+                    "^P (%d+) (%S+) (%S+) (%S+) (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
                 seq = tonumber(seq)
                 if seq ~= nil and seq ~= net.lastRemoteSeq then
                     local t = { X = num(x), Y = num(y), Z = num(z), Yaw = num(yaw),
                         Speed = num(speed), Hp = num(hp), MaxHp = num(maxhp),
-                        Map = (map ~= nil and map ~= "") and map or nil }
+                        Map = (map ~= nil and map ~= "") and map or nil,
+                        Outfit = (outfit ~= nil and outfit:match("^Hun_OutFit_[%w_]+$")) and outfit or nil }
                     -- A position that doesn't parse (or is NaN) is dropped, not applied.
                     if t.X and t.Y and t.Z and t.Yaw then
+                        local now, prev = os.clock(), net.target
+                        local dt = net.targetAt and (now - net.targetAt) or 0
+                        if prev ~= nil and dt > 0.005 and dt < 0.5 then
+                            local vx, vy = (t.X - prev.X) / dt, (t.Y - prev.Y) / dt
+                            if vx * vx + vy * vy <= PREDICT_MAX_SPEED * PREDICT_MAX_SPEED then
+                                local v, k = net.vel, PREDICT_BLEND
+                                net.vel = v and { X = v.X * (1 - k) + vx * k, Y = v.Y * (1 - k) + vy * k }
+                                    or { X = vx, Y = vy }
+                            else
+                                net.vel = nil
+                            end
+                        elseif dt >= 0.5 then
+                            net.vel = nil
+                        end
+                        net.targetAt = now
                         net.lastRemoteSeq = seq
                         net.target = t
                     end
@@ -759,6 +800,16 @@ return function(api)
         net.remoteEnemies = enemies
         if net.target ~= nil and not valid(net.ghost) then
             spawnGhost()
+            net.ghostOutfit = nil
+        end
+        -- The partner's outfit, as a wardrobe preview (bIsPreview): shown on the ghost, never saved anywhere.
+        local outfit = net.target and net.target.Outfit
+        if outfit and valid(net.ghost) and net.ghostOutfit ~= outfit then
+            net.ghostOutfit = outfit
+            pcall(function()
+                local c = net.ghost:GetComponentByClass(StaticFindObject("/Script/ProjectPBZ.PBZAppearanceComponent"))
+                c:EquipOutfit(FName(outfit), true)
+            end)
         end
         updateGhostVisibility()
     end
@@ -769,6 +820,8 @@ return function(api)
     local function clearRemoteState()
         net.remoteEnemies = {}
         net.target = nil
+        net.targetAt = nil
+        net.vel = nil
         net.lastRemoteSeq = nil
         net.matchSticky = {}
         net.pendingDeaths = {}

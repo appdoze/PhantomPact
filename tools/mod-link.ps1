@@ -18,6 +18,11 @@ $script:GameWin64 = $GameWin64
 $script:ProcessName = $ProcessName
 $script:LogPath = Join-Path $GameWin64 'ue4ss\UE4SS.log'
 $script:CmdPath = Join-Path $GameWin64 'ue4ss\Mods\PBZCoop\cmd.txt'
+# The test scripts send "eval" commands, which the mod only runs when dev.txt exists next to it.
+$devTxt = Join-Path $GameWin64 'ue4ss\Mods\PBZCoop\dev.txt'
+if (-not (Test-Path $devTxt) -and (Test-Path (Split-Path $devTxt))) {
+    Set-Content -Path $devTxt -Value 'Enables the eval command in cmd.txt (development only).'
+}
 
 $script:TargetPid = 0
 

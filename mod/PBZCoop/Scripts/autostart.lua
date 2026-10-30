@@ -14,6 +14,28 @@ return function(api)
     local RELAY_FRESH_S = 5       -- a relay status this recent means a relay is already running
     local placeholder = "PUT-THE-HOSTS-TAILSCALE-IP-HERE"
 
+    -- Game builds this version was made and tested on, by PBZ.exe size (reading the size is instant; hashing a
+    -- 500 MB exe at startup isn't). Another build still runs, with a warning: function and field names may differ.
+    local KNOWN_BUILDS = {
+        [511072344] = "Steam build 26266538",
+    }
+    local function checkGameBuild()
+        local f = io.open(modRoot() .. "../../../PBZ.exe", "rb")
+        if not f then
+            return
+        end
+        local size = f:seek("end")
+        f:close()
+        if KNOWN_BUILDS[size] then
+            log("Game build: " .. KNOWN_BUILDS[size] .. " (supported).")
+        else
+            api.gameBuildWarning = "This game update isn't tested with this Phantom Pact version; some co-op features may fail."
+            log("WARNING: PBZ.exe (" .. tostring(size) .. " bytes) is a game build this Phantom Pact version wasn't "
+                .. "tested on. Co-op may partly fail; check for a Phantom Pact update.")
+        end
+    end
+    pcall(checkGameBuild)
+
     local function readText(path)
         local f = io.open(path, "r")
         if not f then
@@ -67,9 +89,13 @@ return function(api)
         log("PhantomPact.ini: Network = " .. tostring(settings.network) .. " isn't Tailscale, Direct or Steam; using Tailscale.")
         network = "tailscale"
     end
+    -- Empty or Auto: find the partner among Steam friends playing PBZ (their relay advertises the other role).
     local partner = settings.partnersteamid or ""
-    if network == "steam" and not partner:match("^7656119%d+$") then
-        log("PhantomPact.ini: Network = Steam needs PartnerSteamID (your partner's SteamID64, 7656119...). Co-op is off.")
+    if partner == "" or partner:lower() == "auto" then
+        partner = "auto"
+    end
+    if network == "steam" and partner ~= "auto" and not partner:match("^7656119%d+$") then
+        log("PhantomPact.ini: PartnerSteamID must be Auto or a SteamID64 (17 digits, 7656119...). Co-op is off.")
         return
     end
     if network ~= "steam" and modRole == "client"

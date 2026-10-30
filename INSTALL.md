@@ -40,8 +40,18 @@ The UE4SS console shows `Phantom Pact Host: co-op on` (or Guest), and
 | Network | Setup | Latency | Security |
 |---|---|---|---|
 | `Tailscale` (default) | Both install Tailscale; guest sets `HostAddress` to the host's 100.x IP | Direct path when Tailscale connects you directly (`tailscale ping` shows "via <ip>"); higher "via DERP" | WireGuard-encrypted; only Tailscale addresses accepted; add `Secret` |
-| `Direct` | Host forwards UDP `Port` (47800) on the router, or `UPnP = On` does it automatically; guest sets `HostAddress` to the host's public IP (shown as `external_ip=` in the host's `net_status.txt`) | Lowest: plain internet path | Port is open to the internet: the relay refuses to start without the same `Secret` on both PCs (every packet signed, replays dropped). Not encrypted |
-| `Steam` | Both set `PartnerSteamID` to the other's SteamID64; Steam running | Direct peer-to-peer when NAT allows, otherwise Valve's relay network (usually low added latency) | Encrypted and authenticated by Steam; only the partner's SteamID is accepted |
+| `Direct` | Host forwards UDP `Port` (47800) on the router, or `UPnP = On` does it automatically; guest sets `HostAddress` to the host's public IP (shown as `external_ip=` in the host's `net_status.txt`) | Lowest: plain internet path | Port is open to the internet: the relay refuses to start without the same `Secret` on both PCs; packets are then encrypted and authenticated (AES-256-GCM, Windows' own crypto) and replays dropped |
+| `Steam` | `PartnerSteamID = Auto` (default) finds your Steam friend playing in the other role; or set their SteamID64. Steam running | Direct peer-to-peer when NAT allows, otherwise Valve's relay network (usually low added latency) | Encrypted and authenticated by Steam; only the partner's SteamID is accepted |
+
+With any network, setting the same `Secret` on both PCs encrypts the packets (AES-256-GCM).
+
+## In-game status
+
+Short tips at the bottom of the screen (the game's own ink-bar tip) tell you when your partner connects or
+disconnects (with the ping, and whether the connection is encrypted), when your settings differ from your
+partner's (version, Network, difficulty, PvP, ShareProgress: both relays compare them), when packets are refused
+because the Secrets differ, when the ping stays high, and when the game was updated to a build this Phantom Pact
+version wasn't tested on. Mod command `tips off` turns them off.
 
 With `Direct`, the guest needs nothing forwarded. If UPnP fails (`upnp=failed`), forward UDP 47800 to the host's
 PC by hand in the router settings.

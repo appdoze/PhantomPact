@@ -434,6 +434,7 @@ api.coop = coop
 api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
 api.scaling = dofile(SCRIPT_DIR .. "scaling.lua")(api)
 api.sync = dofile(SCRIPT_DIR .. "sync.lua")(api)
+api.status = dofile(SCRIPT_DIR .. "status.lua")(api)
 local net = coop.net
 
 -- Helpers for the "eval" command, so test snippets can reuse the mod's functions.
@@ -484,6 +485,7 @@ end
 COMMANDS.pvp = api.pvp.command
 COMMANDS.scale = api.scaling.command
 COMMANDS.sync = api.sync.command
+COMMANDS.tips = api.status.command
 
 local function readCommandFile()
     local path = modDir() .. "cmd.txt"
@@ -508,6 +510,14 @@ local function runCommand(line)
     end
     log("> " .. line)
     if name == "eval" then
+        -- Running arbitrary Lua from cmd.txt is for development only: any program on the PC can write that file.
+        -- Enabled by PBZCOOP_DEBUG=1 or a dev.txt next to the mod (the dev tools create it).
+        local devFile = io.open(modRoot() .. "dev.txt", "r")
+        if devFile then devFile:close() end
+        if not (DEV_KEYS or devFile) then
+            log("eval is off (development only): create dev.txt in the mod folder to enable it.")
+            return
+        end
         local chunk, err = load(rest, "eval", "t")
         if not chunk then
             log("eval compile error: " .. tostring(err))
