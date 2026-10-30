@@ -54,6 +54,7 @@ return function(api)
     local AGGRO_EVERY = 20        -- snapshots between ghost aggro refreshes (1 s)
     local MOVE_WALKING = 1        -- EMovementMode::MOVE_Walking
     local ECC_PAWN = 2            -- ECollisionChannel::ECC_Pawn
+    local ECC_DESTRUCTIBLE = 7    -- ECollisionChannel::ECC_Destructible: jars and pots (BP_ChaosSpawner_*)
     local ECR_IGNORE = 0          -- ECollisionResponse::ECR_Ignore
 
     local net = {
@@ -247,6 +248,9 @@ return function(api)
                 cmc:SetMovementMode(MOVE_WALKING, 0)
             end)
             pcall(function() net.ghost.CapsuleComponent:SetCollisionResponseToChannel(ECC_PAWN, ECR_IGNORE) end)
+            -- Jars aren't shared: one the partner broke still stands here and would block their ghost, which then
+            -- ran in place between jars (issue #3). Walk through them; nothing here breaks or saves them.
+            pcall(function() net.ghost.CapsuleComponent:SetCollisionResponseToChannel(ECC_DESTRUCTIBLE, ECR_IGNORE) end)
             if game.setupGhost then
                 game.setupGhost(net.ghost)
             end
