@@ -442,6 +442,7 @@ api.status = dofile(SCRIPT_DIR .. "status.lua")(api)
 api.partner = dofile(SCRIPT_DIR .. "partner.lua")(api)
 api.moves = dofile(SCRIPT_DIR .. "moves.lua")(api)
 api.hud = dofile(SCRIPT_DIR .. "hud.lua")(api)
+api.mapicon = dofile(SCRIPT_DIR .. "mapicon.lua")(api)
 api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
 api.scaling = dofile(SCRIPT_DIR .. "scaling.lua")(api)
 local net = coop.net

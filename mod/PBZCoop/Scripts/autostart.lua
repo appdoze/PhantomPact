@@ -78,6 +78,9 @@ return function(api)
     if api.hud then
         api.hud.set((settings.partnercompass or "on"):lower() ~= "off")
     end
+    if api.mapicon then
+        api.mapicon.on = (settings.partnermapicon or "on"):lower() ~= "off"
+    end
     local role = (settings.role or "off"):lower()
     local modRole = ({ host = "host", guest = "client" })[role]
     if not modRole then
