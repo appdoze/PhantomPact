@@ -32,8 +32,14 @@ local function log(msg)
     print(TAG .. msg .. "\n")
 end
 
+-- Safe for anything: a stale reference handed back mid-respawn once had an IsValid that wasn't a function
+-- ("attempt to call a string value"), which broke that tick's whole snapshot read.
 local function valid(obj)
-    return obj ~= nil and obj:IsValid()
+    if obj == nil or type(obj) == "string" or type(obj) == "number" or type(obj) == "boolean" then
+        return false
+    end
+    local ok, result = pcall(function() return obj:IsValid() end)
+    return ok and result == true
 end
 
 local function gameplayStatics()
