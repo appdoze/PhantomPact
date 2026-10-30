@@ -10,3 +10,6 @@ art/screenshots/*.png
 # Local Claude Code settings
 .claude/
 __pycache__/
+
+# Native relay build output
+relay/target/

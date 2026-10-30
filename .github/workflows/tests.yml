@@ -18,3 +18,20 @@ jobs:
           python-version: "3.12"
       # stdlib only: nothing to install. The Steam test needs a running Steam client and is skipped here.
       - run: python -I net/test_pbzcoop_net.py
+
+  native:
+    # The native relay (relay/, Rust): its own tests (including a Lua 5.4 compile of every mod script), then the
+    # whole Python suite again with native and mixed native/Python relay pairs.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: cargo test --release --manifest-path relay/Cargo.toml
+      - run: cargo build --release --manifest-path relay/Cargo.toml
+      - run: python -I net/test_pbzcoop_net.py

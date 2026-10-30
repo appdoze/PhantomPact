@@ -45,7 +45,8 @@ Early release, 2 players. Connecting is over Tailscale for now; Steam joining is
 |---|---|
 | [mod/PBZCoop/](mod/PBZCoop/) | UE4SS Lua mod: `coop.lua` (online sync), `pbz.lua` (game adapter: enemies, health, moves, bosses, items), `autostart.lua` (reads `PhantomPact.ini`, starts the relay, turns sync on), `main.lua` (loader, commands) |
 | [net/pbzcoop_net.py](net/pbzcoop_net.py) | Relay over UDP (Tailscale): snapshots + reliable events; host, client, echo, record/replay |
-| [net/test_pbzcoop_net.py](net/test_pbzcoop_net.py) | Relay tests: `python -I net\test_pbzcoop_net.py` |
+| [relay/](relay/) | Native relay (Rust): drop-in for the Python relay, same protocol, no Python needed ([docs/NATIVE_PLUGIN.md](docs/NATIVE_PLUGIN.md)); `cargo build --release --manifest-path relay\Cargo.toml` |
+| [net/test_pbzcoop_net.py](net/test_pbzcoop_net.py) | Relay tests: `python -I net\test_pbzcoop_net.py` (also runs native and mixed native/Python pairs once relay/ is built) |
 | [net/pbzcoop_bot.py](net/pbzcoop_bot.py) | Bot partner for live tests without a second PC |
 | [tools/pbz-coop.ps1](tools/pbz-coop.ps1) | Developer launcher: relay + `neton` by hand (`-Role host/client/echo/loop/record/replay`, `-Stop`) |
 | [tools/install-mod.ps1](tools/install-mod.ps1) | Installs the mod into the game's UE4SS `Mods` folder (finds the game through Steam) |

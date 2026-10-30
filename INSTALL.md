@@ -13,7 +13,8 @@ https://github.com/yhsharaf/PhantomPact/issues, with what happened (host or gues
 
 1. **Phantom Blade Zero** on Steam.
 2. **UE4SS for Phantom Blade Zero** by Vercadi (Nexus Mods), installed in `PBZ\platform\steam`.
-3. **Python 3** from python.org, with "Add python to PATH" ticked during install.
+3. **Python 3** from python.org, with "Add python to PATH" ticked during install. Not needed with the native relay
+   (`relay\pbzcoop_relay.exe` in the mod folder, used automatically when present; `Relay` in `PhantomPact.ini`).
 4. **Tailscale** (tailscale.com), both signed in to the same network. Not needed with `Network = Direct` or
    `Network = Steam` (see "Ways to connect" below).
 
@@ -94,7 +95,8 @@ Not in PvP yet: executions (posture break only staggers), and you don't see your
 - **"Python 3 wasn't found":** install Python 3 from python.org with "Add python to PATH" ticked, then restart the
   game.
 - **`connected=no`:** both on Tailscale? The right IP in the guest's `HostAddress`? The same `Secret` on both PCs
-  (`net_status.txt` counts `rejected=` packets with a wrong secret)? Windows Firewall must allow Python on private
+  (`net_status.txt` counts `rejected=` packets with a wrong secret)? Windows Firewall must allow Python (or
+  pbzcoop_relay.exe) on private
   networks (Windows asks the first time the host plays; click Allow).
 - **Lag:** run `tailscale ping <partner's IP>`. "via DERP(...)" means Tailscale couldn't connect you directly and
   relays through its servers, which adds latency; "via <ip>:<port>" is direct. A direct connection usually needs

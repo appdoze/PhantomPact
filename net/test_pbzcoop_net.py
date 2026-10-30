@@ -10,6 +10,11 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 RELAY = os.path.join(HERE, "pbzcoop_net.py")
 PORT = 47911
+PYTHON_RELAY = [sys.executable, "-I", RELAY]
+# The native relay (relay/, cargo build --release): the same tests run against it, and against a mix of both.
+NATIVE = os.environ.get("PBZ_RUST_RELAY") or os.path.join(HERE, "..", "relay", "target", "release",
+                                                          "pbzcoop_relay.exe" if os.name == "nt" else "pbzcoop_relay")
+HAVE_NATIVE = os.path.isfile(NATIVE)
 
 
 def write(path, text):
@@ -39,6 +44,9 @@ def event_lines(path):
 
 
 class RelayLoopback(unittest.TestCase):
+    HOST = PYTHON_RELAY      # command for the host / echo relay
+    CLIENT = PYTHON_RELAY    # command for the client relay
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.a = os.path.join(self.tmp.name, "a")
@@ -54,8 +62,8 @@ class RelayLoopback(unittest.TestCase):
         self.tmp.cleanup()
 
     def start(self, *args):
-        p = subprocess.Popen([sys.executable, "-I", RELAY, *args], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+        cmd = self.CLIENT if args[0] == "client" else self.HOST
+        p = subprocess.Popen([*cmd, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.procs.append(p)
         return p
 
@@ -333,9 +341,11 @@ class Direct(unittest.TestCase):
     """Direct (port forwarding): open to any address, so a secret is required; UPnP asks the router for the
     forward. The router here is a fake on 127.0.0.1 that records the SOAP actions."""
 
+    RELAY_CMD = PYTHON_RELAY
+
     def test_direct_refuses_to_start_without_a_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
-            p = subprocess.run([sys.executable, "-I", RELAY, "host", "--dir", tmp, "--port", str(PORT), "--allow", "any",
+            p = subprocess.run([*self.RELAY_CMD, "host", "--dir", tmp, "--port", str(PORT), "--allow", "any",
                                 "--seconds", "1"], capture_output=True, text=True, timeout=20)
             self.assertEqual(p.returncode, 2)
             self.assertIn("error=direct-needs-secret", read(os.path.join(tmp, "net_status.txt")))
@@ -377,7 +387,7 @@ class Direct(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 write(os.path.join(tmp, "PhantomPact.ini"), "Secret = s3cret\n")
                 url = f"http://127.0.0.1:{server.server_port}/rootDesc.xml"
-                p = subprocess.run([sys.executable, "-I", RELAY, "host", "--dir", tmp, "--port", str(PORT),
+                p = subprocess.run([*self.RELAY_CMD, "host", "--dir", tmp, "--port", str(PORT),
                                     "--allow", "any", "--upnp", "--upnp-location", url, "--seconds", "1.5"],
                                    capture_output=True, text=True, timeout=30)
                 self.assertIn("upnp=ok external_ip=203.0.113.7", p.stdout)
@@ -438,6 +448,44 @@ class Latency(RelayLoopback):
         # Before: up to one 50 ms relay tick on top of the network (median ~35-50 ms here). Now: one 5 ms file
         # check (median ~15-25 ms with the test's own polling); the bound only catches a return to tick-paced sends.
         self.assertLess(median, 0.035)
+
+
+# ------------------------------------------------------------------------------- native relay (relay/, Rust)
+
+NATIVE_RELAY = [NATIVE]
+needs_native = unittest.skipUnless(HAVE_NATIVE, "build relay/ (cargo build --release) or set PBZ_RUST_RELAY")
+
+
+@needs_native
+class NativeLoopback(SecureLoopback):
+    """Native relay on both sides: every loopback, security and handshake test."""
+    HOST = CLIENT = NATIVE_RELAY
+
+
+@needs_native
+class NativeHostPythonClient(SecureLoopback):
+    """Mixed: a player on the native relay and one on the Python relay play together."""
+    HOST, CLIENT = NATIVE_RELAY, PYTHON_RELAY
+
+
+@needs_native
+class PythonHostNativeClient(SecureLoopback):
+    HOST, CLIENT = PYTHON_RELAY, NATIVE_RELAY
+
+
+@needs_native
+class NativeHandshake(Handshake):
+    HOST, CLIENT = NATIVE_RELAY, PYTHON_RELAY
+
+
+@needs_native
+class NativeDirect(Direct):
+    RELAY_CMD = NATIVE_RELAY
+
+
+@needs_native
+class NativeLatency(Latency):
+    HOST = CLIENT = NATIVE_RELAY
 
 
 if __name__ == "__main__":

@@ -1,57 +1,43 @@
-# Design: a native UE4SS plugin instead of the Python relay
+# The native relay (Rust) instead of the Python relay
 
-Status: proposal, not implemented. Removes the Python requirement and the file hand-off between the mod and the
-relay, which are the two remaining costs of the current design (install step, and ~15-25 ms of local latency
-plus file-system timing jitter).
+Status: implemented in `relay/` (Phantom Pact 1.3.0). `relay\pbzcoop_relay.exe` is a drop-in for
+`net/pbzcoop_net.py`: same command line, same files in the mod folder, same wire protocol (JSON packets `v = 2`,
+hello/settings exchange, AES-256-GCM / HMAC framing, replay window, address filter, UPnP, Steam Networking Messages).
+A player on the native relay and a player on the Python relay play together. Players no longer need Python.
 
-## Today
+`PhantomPact.ini` `Relay = Auto` (default) starts the native relay when `relay\pbzcoop_relay.exe` is installed, else
+the Python one; `Native` / `Python` force one.
 
-```
-game (UE4SS Lua mod) --net_out.txt / net_events_out.txt--> relay (Python, UDP / Steam) --network-->
-relay --net_in.txt / net_events_in.txt--> game
-```
+## Why a separate program, not a DLL inside the game
 
-Lua in UE4SS has no sockets, so the mod and the relay meet in text files. The relay is ~1000 lines of stdlib
-Python: snapshots (newest wins), reliable numbered events with acks, a hello/settings exchange, AES-GCM / HMAC
-packet protection, an address filter, UPnP, and Steam Networking Messages.
+The first design (below, kept for reference) was a UE4SS C++ mod running the relay on a thread inside the game.
+It was rejected, for a Rust build too:
 
-## Proposal
+- UE4SS for PBZ (3.0.1-1183-gcdbc0b66) exports no Lua C API, so a native Lua module can't register functions for
+  the Lua mod. The only native entry point is UE4SS's C++ mod ABI (C++ classes compiled against UE4SS's own
+  headers with MSVC). Reproducing that ABI from Rust means matching C++ vtable layouts by hand, and any mismatch,
+  or any UE4SS update, crashes the game.
+- A crash in an in-process plugin takes the game (and possibly an unsaved run) down. A separate relay can only fail
+  by itself; the mod sees `net_status.txt` go stale.
+- The file hand-off costs one 5 ms file check per direction (median 11-13 ms file to file on loopback, measured by
+  the Latency tests), small next to network latency.
 
-A UE4SS C++ mod (`PBZCoopNet.dll` in `Mods/PBZCoop/dlls/main.dll`, loaded by UE4SS like Lua mods) that runs the
-relay's protocol on a background thread inside the game process and exposes it to the Lua mod as functions:
+So the relay is native code but out of process: it removes the Python requirement, starts faster and uses less
+memory, and keeps the game safe.
 
-| Lua side (registered by the C++ mod) | Replaces |
-|---|---|
-| `PBZNet.Start(role, settingsTable)` / `PBZNet.Stop()` | starting `pbzcoop_net.py` with `os.execute` |
-| `PBZNet.SendSnapshot(text)` | writing `net_out.txt` |
-| `PBZNet.SendEvent(line)` | appending to `net_events_out.txt` |
-| `PBZNet.PollSnapshot()` -> text or nil | reading `net_in.txt` |
-| `PBZNet.PollEvents()` -> array of lines | reading `net_events_in.txt` |
-| `PBZNet.Status()` -> table | reading `net_status.txt` |
+## Tests
 
-The wire protocol stays exactly the relay's (JSON packets, `v = 2`, same hello, same AES-GCM framing), so a native
-player and a Python player interoperate during a transition.
+- `cargo test --release --manifest-path relay/Cargo.toml`: packet protection (round trip, tampering, replay,
+  downgrade), event files, ini, UPnP URL handling, settings comparison, and a Lua 5.4 compile of every mod script.
+- `python -I net/test_pbzcoop_net.py` runs every loopback, security, handshake, Direct/UPnP and latency test again
+  with native-native, native-host/Python-client and Python-host/native-client pairs (when the release build exists,
+  or `PBZ_RUST_RELAY` points at it). CI does both on Windows and Linux.
+- Steam: checked by hand with the game's `steam_api64.dll` and Steam running (SteamAPI_InitFlat, the user's
+  SteamID, SendMessageToUser).
 
-Transports:
-- UDP: Winsock, non-blocking, polled from the network thread.
-- AES-GCM: Windows CNG (`BCryptEncrypt`), as the relay already does through ctypes.
-- Steam: the game's own `steam_api64.dll` is already loaded in the process, so `SteamNetworkingMessages()` can be
-  used directly, without a second `SteamAPI_Init` (the relay's separate process needs its own).
-- UPnP: the same SSDP + SOAP calls with WinHTTP.
+## Earlier proposal: in-process UE4SS C++ mod (not built)
 
-## Costs and risks
-
-- Build: UE4SS's C++ mod template must be compiled against the exact UE4SS version shipped for PBZ
-  (3.0.1-1183-gcdbc0b66) with MSVC; a UE4SS update can require a rebuild.
-- Distribution: Nexus quarantines `.dll` uploads in mods that aren't marked as containing executables; the mod
-  page has to declare it. Players have to trust a binary instead of readable Python.
-- A crash in the DLL takes the game down; the Python relay can only fail by itself. The network thread must
-  never call game objects (only the Lua side does, on the game thread).
-
-## Suggested path
-
-1. Keep the Python relay as the reference implementation and test suite (net/test_pbzcoop_net.py drives it over
-   files; the same tests can drive the DLL through a small Lua harness).
-2. Build the DLL with UDP + hello + events first, behind `Transport = Native` in PhantomPact.ini.
-3. Add AES-GCM, then Steam (in-process), then UPnP.
-4. Make Native the default once a release has been played in both roles without the Python relay.
+A `PBZCoopNet.dll` loaded by UE4SS that would run the relay protocol on a background thread and expose
+`PBZNet.Start / SendSnapshot / SendEvent / PollSnapshot / PollEvents / Status` to Lua, replacing the files. It
+would have used the game's already-initialised Steam API in process. Costs: an MSVC build against the exact UE4SS
+version, Nexus quarantine of `.dll` uploads, and game crashes from any bug.

@@ -1,5 +1,6 @@
--- Phantom Pact auto-start: reads PhantomPact.ini, starts the network relay (net/pbzcoop_net.py, with the
--- player's own Python) when the game starts, and turns online sync on once the player is in gameplay.
+-- Phantom Pact auto-start: reads PhantomPact.ini, starts the network relay (relay\pbzcoop_relay.exe, or
+-- net/pbzcoop_net.py with the player's own Python) when the game starts, and turns online sync on once the player
+-- is in gameplay.
 -- Players only edit the ini; nothing to run by hand.
 --
 -- The relay stops by itself when the game closes: this file rewrites net_alive.txt every few seconds and the
@@ -117,16 +118,29 @@ return function(api)
         return t ~= nil and os.time() - t <= RELAY_FRESH_S
     end
 
+    local function exists(path)
+        local f = io.open(path, "rb")
+        if f then
+            f:close()
+        end
+        return f ~= nil
+    end
+
     local function startRelay()
+        -- Relay = Auto (default): the native relay (relay\pbzcoop_relay.exe, no Python needed) when it's installed,
+        -- else the Python one. Native / Python force one. Both speak the same protocol, so the two players may differ.
+        local choice = (settings.relay or "auto"):lower()
+        local native = modRoot() .. "relay/pbzcoop_relay.exe"
         local relay = modRoot() .. "relay/pbzcoop_net.py"
-        local f = io.open(relay, "r")
-        if not f then
+        local useNative = choice ~= "python" and exists(native)
+        if choice == "native" and not useNative then
+            log("PhantomPact.ini: Relay = Native but " .. native .. " isn't installed; using the Python relay.")
+        end
+        if not useNative and not exists(relay) then
             log("Relay not found at " .. relay .. ". Reinstall Phantom Pact.")
             return false
         end
-        f:close()
-        local args = string.format('-I "%s" %s --dir "%s" --port %d --alive-file "%s"', relay,
-            modRole, modDir(), port, alivePath)
+        local args = string.format('%s --dir "%s" --port %d --alive-file "%s"', modRole, modDir(), port, alivePath)
         if network == "steam" then
             -- The game's own steam_api64.dll sits next to PBZ.exe, three folders above ue4ss\Mods\PBZCoop.
             args = args .. string.format(' --transport steam --partner %s --steam-dll "%s"', partner,
@@ -142,16 +156,28 @@ return function(api)
                 end
             end
         end
-        -- pyw/pythonw: Python without a console window. The py launcher comes with python.org installs; plain
-        -- pythonw covers the rest. "start" returns at once, so the game doesn't wait.
-        local cmd = string.format('where pyw >nul 2>nul && (start "" pyw -3 %s) || (where pythonw >nul 2>nul && start "" pythonw %s)',
-            args, args)
-        local ok = os.execute(cmd)
+        local ok, kind
+        if useNative then
+            -- A Windows-subsystem program: no console window. "start" returns at once, so the game doesn't wait.
+            ok = os.execute(string.format('start "" "%s" %s', native, args))
+            kind = "native relay"
+        else
+            -- pyw/pythonw: Python without a console window. The py launcher comes with python.org installs; plain
+            -- pythonw covers the rest.
+            local py = string.format('-I "%s" %s', relay, args)
+            ok = os.execute(string.format('where pyw >nul 2>nul && (start "" pyw -3 %s) || (where pythonw >nul 2>nul && start "" pythonw %s)',
+                py, py))
+            kind = "Python relay"
+            if not ok then
+                log("Couldn't start the relay: Python 3 wasn't found. Install it from python.org (tick \"Add python to PATH\") and restart the game.")
+                return false
+            end
+        end
         if not ok then
-            log("Couldn't start the relay: Python 3 wasn't found. Install it from python.org (tick \"Add python to PATH\") and restart the game.")
+            log("Couldn't start the native relay (" .. native .. ").")
             return false
         end
-        log("Relay started as " .. role .. (modRole == "client" and (", joining " .. hostAddress) or "") .. " on UDP " .. port .. ".")
+        log(kind .. " started as " .. role .. (modRole == "client" and (", joining " .. hostAddress) or "") .. " on UDP " .. port .. ".")
         return true
     end
 
@@ -181,6 +207,7 @@ return function(api)
                         tonumber(settings.coopenemyposture) or 130))
                 end
                 if api.sync then
+                    api.sync.codex = (settings.sharecodex or "off"):lower() == "on"
                     api.sync.set((settings.shareprogress or "on"):lower() ~= "off")
                 end
                 if (settings.pvp or ""):lower() == "on" and api.pvp then
