@@ -130,6 +130,9 @@ return function(api)
                     api.scaling.command(string.format("%d %d", tonumber(settings.coopenemyhealth) or 150,
                         tonumber(settings.coopenemyposture) or 130))
                 end
+                if api.sync then
+                    api.sync.set((settings.shareprogress or "on"):lower() ~= "off")
+                end
                 if (settings.pvp or ""):lower() == "on" and api.pvp then
                     if tonumber(settings.pvpdamage) then
                         api.pvp.command("damage " .. settings.pvpdamage)

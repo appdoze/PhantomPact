@@ -433,6 +433,7 @@ local coop = dofile(SCRIPT_DIR .. "coop.lua")(api)
 api.coop = coop
 api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
 api.scaling = dofile(SCRIPT_DIR .. "scaling.lua")(api)
+api.sync = dofile(SCRIPT_DIR .. "sync.lua")(api)
 local net = coop.net
 
 -- Helpers for the "eval" command, so test snippets can reuse the mod's functions.
@@ -482,6 +483,7 @@ for name, fn in pairs(api.game.commands or {}) do
 end
 COMMANDS.pvp = api.pvp.command
 COMMANDS.scale = api.scaling.command
+COMMANDS.sync = api.sync.command
 
 local function readCommandFile()
     local path = modDir() .. "cmd.txt"

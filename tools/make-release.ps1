@@ -19,7 +19,7 @@ $mod = Join-Path $stage 'platform\steam\ue4ss\Mods\PBZCoop'
 New-Item -ItemType Directory -Force (Join-Path $mod 'Scripts'), (Join-Path $mod 'relay') | Out-Null
 
 Copy-Item (Join-Path $root 'INSTALL.md') (Join-Path $stage 'Phantom Pact - INSTALL.md')
-foreach ($f in 'enabled.txt', 'PhantomPact.ini') { Copy-Item (Join-Path $root "mod\PBZCoop\$f") $mod }
+foreach ($f in 'enabled.txt', 'PhantomPact.ini', 'mobdomains.txt') { Copy-Item (Join-Path $root "mod\PBZCoop\$f") $mod }
 Copy-Item (Join-Path $root 'mod\PBZCoop\Scripts\*.lua') (Join-Path $mod 'Scripts')
 # The PvP victory calligraphy (生还, painted in Lumina), loaded by pbz.lua at run time.
 New-Item -ItemType Directory -Force (Join-Path $mod 'art') | Out-Null
