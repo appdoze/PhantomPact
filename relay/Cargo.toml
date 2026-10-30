@@ -1,6 +1,6 @@
 [package]
 name = "pbzcoop-relay"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 description = "Phantom Pact network relay (native build of net/pbzcoop_net.py; same protocol and files)"
 license = "MIT"

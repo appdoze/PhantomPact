@@ -181,8 +181,16 @@ fn revive_brings_the_downed_partner_back_and_dialogue_lines_become_tips() {
             net.target = { X = 0, Y = 0, Z = 0, Yaw = 0, Hp = 0, MaxHp = 100, Map = "PBZ_Xigu_WP" }
             net.targetAt = os.clock()
             M.regroup()
-            -- the other side: revive received while down; back on its feet -> teleported to the reviver
-            api.coop.handlers.Y()
+            -- the other side: revive received while down -> the game's revive point moves to the reviver's side
+            -- and is put back once revived; revived next to the partner, so no teleport is needed
+            local revive = { Translation = { X = 1, Y = 2, Z = 3 }, Rotation = { X = 0, Y = 0, Z = 0, W = 1 } }
+            local set = {}
+            objects.PBZGameSystem = {
+                GetReviveTransform = function(_, t, cam) t.Translation = revive.Translation t.Rotation = revive.Rotation end,
+                SetReviveTransform = function(_, t) set[#set + 1] = string.format("%.0f,%.0f,%.0f", t.Translation.X, t.Translation.Y, t.Translation.Z) end,
+            }
+            net.localMap = "PBZ_Xigu_WP"
+            api.coop.handlers.Y("500 0 0 PBZ_Xigu_WP")
             net.target = { X = 500, Y = 0, Z = 0, Yaw = 0, Hp = 100, MaxHp = 100, Map = "PBZ_Xigu_WP" }
             hp[1] = 0 net.targetAt = os.clock() check() check()
             hp[1] = 100 net.targetAt = os.clock() check()
@@ -193,12 +201,12 @@ fn revive_brings_the_downed_partner_back_and_dialogue_lines_become_tips() {
                 IsVisible = function() return true end, DialogueData = { Text = { ToString = function() return line end } } } } end return {} end
             check() check()
             api.coop.handlers.T("Soul: Who goes there?")
-            return table.concat(sent, ";") .. " | teleports " .. table.concat(teleports, ",") .. " | " .. table.concat(tips, " / ")
+            return table.concat(sent, ";") .. " | teleports " .. table.concat(teleports, ",") .. " | revive point " .. table.concat(set, " then ") .. " | " .. table.concat(tips, " / ")
             "#,
         )
         .eval()
         .unwrap();
-    assert!(out.starts_with("Y;T Hun: The blade remembers. | teleports PBZ_Xigu_WP |"), "{out}");
+    assert!(out.starts_with("Y 0 0 0 PBZ_Xigu_WP;T Hun: The blade remembers. | teleports  | revive point 500,0,50 then 1,2,3 |"), "{out}");
     assert!(out.contains("revive sent"), "{out}");
     assert!(out.contains("your partner is reviving you"), "{out}");
     assert!(out.contains("revived: back at your partner's side"), "{out}");
@@ -311,4 +319,93 @@ fn partner_line_says_where_the_partner_is() {
         .eval()
         .unwrap();
     assert_eq!(out, "Partner: connecting... | Partner 82% · 35 m | Partner: down | Partner 50% · in a cutscene | Partner 50% · in another area");
+}
+
+#[test]
+fn guest_enemies_glide_back_and_only_jump_across_big_gaps() {
+    let lua = load("", &scratch("smooth"));
+    let out: String = lua
+        .load(
+            r#"
+            local smooth = dofile(MOD_ROOT .. "Scripts/smoothing.lua")
+            local function at(x) return { X = x, Y = 0, Z = 0 } end
+            local res = {}
+            local function show(cur, tgt) local x, _, _, snap = smooth(cur, tgt)
+                res[#res + 1] = x == nil and "-" or string.format("%.0f%s", x, snap and "!" or "") end
+            show(at(0), at(100))       -- within 1.5 m: left to the AI
+            show(at(0), at(400))       -- 25% of 4 m
+            show(at(0), at(1500))      -- 25% would be 3.75 m: capped at 1.2 m
+            show(at(0), at(2500))      -- beyond 20 m: jump
+            show(at(0), { X = 0/0, Y = 0, Z = 0 })   -- NaN: nothing
+            -- a 6 m drift closes in a few updates without ever jumping
+            local cur, n = at(0), 0
+            while true do local x = smooth(cur, at(600)) if not x then break end cur = at(x) n = n + 1 end
+            return table.concat(res, " ") .. " | 6 m closed in " .. n .. " updates to " .. string.format("%.0f", cur.X)
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(out, "- 100 120 2500! - | 6 m closed in 6 updates to 486");
+}
+
+#[test]
+fn catch_up_asks_once_and_answers_with_everything_once() {
+    let lua = load("sync.lua", &scratch("catchup"));
+    let out: String = lua
+        .load(
+            r#"
+            M.catchUp = true
+            net.enabled = true
+            local tick = api.coop.extraTicks.sync
+            for _ = 1, 120 do tick() end                           -- first scan: baseline, and the request
+            for _ = 1, 120 do tick() end                           -- no second request
+            local asked = table.concat(sent, ";")
+            sent = {}
+            M.known.quests["/Game/Quests/Q1.Q1_C"] = true
+            M.known.bells["Bell_NLES_001"] = true
+            M.known.actors["PBZ_Xigu_WP-BP_Chest_C_1"] = true
+            api.coop.handlers.Z()
+            api.coop.handlers.Z()                                   -- answered once per session
+            table.sort(sent)
+            return asked .. " | " .. table.concat(sent, ";")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(out, "Z | A PBZ_Xigu_WP-BP_Chest_C_1;L Bell_NLES_001;Q /Game/Quests/Q1.Q1_C");
+}
+
+#[test]
+fn quest_steps_complete_the_same_branch_and_lifts_follow_the_partner() {
+    let lua = load("sync.lua", &scratch("steps"));
+    let out: String = lua
+        .load(
+            r#"
+            local log = {}
+            local function obj(t) t.IsValid = function() return true end return t end
+            local branch = obj({ done = false, IsCompleted = function(self) return self.done end,
+                SucceedBranch = function(self) self.done = true log[#log + 1] = "SucceedBranch" end })
+            local quest = obj({ GetQuestCompletion = function() return 1 end,
+                GetBranch = function(_, id) log[#log + 1] = "GetBranch " .. id return branch end })
+            objects.PBZNarrativeComponent = obj({ GetQuest = function() return nil end,
+                BeginQuest = function() log[#log + 1] = "BeginQuest" return quest end,
+                GetInProgressQuests = function() return {} end, GetAllQuests = function() return {} end })
+            function StaticFindObject(p) return obj({ path = p }) end
+            local W = api.coop.handlers.W
+            W("/Game/PBZstory/PBZQuest/Main/MainCh2.MainCh2_C MainCh2_PBZQuestBranch_4")
+            W("/Game/PBZstory/PBZQuest/Main/MainCh2.MainCh2_C MainCh2_PBZQuestBranch_4")  -- already done: no-op
+            W("not a path B1")
+            -- lifts: the partner's lift went up; ours moves up once, and isn't sent back
+            local lift = obj({ Positive = false, DoPositiveAction = function(self) self.Positive = true log[#log + 1] = "up" end,
+                DoNegativeAction = function(self) self.Positive = false log[#log + 1] = "down" end })
+            objects.PBZLevelActorManager = { GetActorByID = function() return lift end, ActorSaveData = { ForEach = function() end } }
+            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_1_2 1")
+            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_1_2 1")
+            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_1_2 0")
+            return table.concat(log, ", ") .. " | sent " .. #sent
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(out, "BeginQuest, GetBranch MainCh2_PBZQuestBranch_4, SucceedBranch, BeginQuest, GetBranch MainCh2_PBZQuestBranch_4, up, down | sent 0");
 }

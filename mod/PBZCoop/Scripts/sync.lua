@@ -9,6 +9,9 @@
 --                          ExecuteNodeGuid record, the one the map's completion reads
 --   X <enemy class path>   a codex entry discovered: PBZCodexSubsystem.DiscoveredEnemyPaths (sending needs
 --                          ShareCodex, on by default)
+--   W <quest path> <branch> a quest step (branch) completed: the partner completes the same branch with its own
+--                          QuestBranch.SucceedBranch, so the story moves on step by step, not only at the end
+--   F <Level>-<Actor> <0|1> a lift moved: DoPositiveAction / DoNegativeAction (checked in game: moved, recorded)
 --   J <store> <id>         new equipment, from a chest or anywhere: accessory (acc), medicine (med), weapon (weap) or
 --                          Phantom Edge weapon (edge); the partner gets it through the backpack's own
 --                          PushAccessoryToInventory / PushMedicineToInventory / AddWeaponItem (checked in game)
@@ -27,7 +30,9 @@
 -- of a chest stay with the player who opened it (new equipment is shared separately, J).
 --
 -- Only changes made while sync is on are shared: when sync starts, the current state is the baseline, so joining a
--- partner never pushes either player's whole story onto the other. While a batch is applied the game's save veto
+-- partner never pushes either player's whole story onto the other. Catch-up (PhantomPact.ini CatchUp = On, or the
+-- "sync catchup" command) is the exception, on request: "Z" asks the partner for everything they have, and what
+-- this world is missing is applied through the same handlers (saves that differ end up with the union). While a batch is applied the game's save veto
 -- is held, so an autosave can't capture a half-applied state.
 
 return function(api)
@@ -65,6 +70,9 @@ return function(api)
         shown = {},                 -- chests shown open this session (their record waits for pbzsave coop-sync)
         ledgered = {},              -- ids already in shared_world.txt
         codex = true,               -- send new codex entries (PhantomPact.ini ShareCodex)
+        catchUp = false,            -- ask for the partner's whole progress when a session starts (CatchUp)
+        askedCatchUp = false,
+        answeredCatchUp = false,
         sent = 0,
         applied = 0,
         failed = 0,
@@ -184,7 +192,7 @@ return function(api)
     end
 
     local function scan()
-        local state = { quests = {}, bells = {}, mobs = {}, nodes = {}, codex = {}, actors = {}, equip = {} }
+        local state = { quests = {}, bells = {}, mobs = {}, nodes = {}, codex = {}, actors = {}, equip = {}, steps = {} }
         local nc = first("PBZNarrativeComponent")
         if nc then
             each(nc:GetAllQuests(), function(e)
@@ -198,6 +206,24 @@ return function(api)
         local bm = first("BellManager")
         if bm then
             each(bm:GetAllActivateBellIDs(), function(e) state.bells[str(e)] = true end)
+        end
+        -- Quest steps: completed branches of the quests in progress, through the quest's own functions (its sets
+        -- of branches must not be iterated from Lua: that broke UE4SS's game-thread queue in testing).
+        if nc then
+            each(nc:GetInProgressQuests(), function(e)
+                local q = e
+                pcall(function() q = e:get() end)
+                if valid(q) then
+                    local path = (q:GetClass():GetFullName():gsub("^%S+ ", ""))
+                    each(q:GetAllBranches(), function(b)
+                        local br = b
+                        pcall(function() br = b:get() end)
+                        if valid(br) and br:IsCompleted() then
+                            state.steps[path .. " " .. br.ID:ToString()] = true
+                        end
+                    end)
+                end
+            end)
         end
         local gs = first("PBZGameSystem")
         if gs then
@@ -326,9 +352,14 @@ return function(api)
         local now = scan()
         if sync.known == nil then
             sync.known = now
+            if sync.catchUp and not sync.askedCatchUp then
+                sync.askedCatchUp = true
+                coop.sendEvent("Z")
+                log("Shared progress: asked the partner for their whole progress (catch-up).")
+            end
             return
         end
-        for kind, key in pairs({ quests = "Q", bells = "L", mobs = "G", nodes = "N", codex = "X", actors = "A", equip = "J" }) do
+        for kind, key in pairs({ quests = "Q", bells = "L", mobs = "G", nodes = "N", codex = "X", actors = "A", equip = "J", steps = "W" }) do
             for id in pairs(now[kind]) do
                 if not sync.known[kind][id] then
                     sync.known[kind][id] = true
@@ -344,7 +375,7 @@ return function(api)
         if not sync.on then
             return
         end
-        if sync.known then
+        if sync.known and sync.known[kind] then
             sync.known[kind][id] = true     -- learned from the partner: don't send it back
         end
         local sl = first("PBZSaveLoadSubsystem")
@@ -450,6 +481,94 @@ return function(api)
         end)
     end
 
+    -- A quest step: begin the quest if needed, then complete that branch through the quest's own function.
+    local function questOf(path)
+        local nc = first("PBZNarrativeComponent")
+        if not nc then
+            error("no narrative component")
+        end
+        local cls = StaticFindObject(path)
+        if not valid(cls) then
+            cls = LoadAsset(path)
+        end
+        if not valid(cls) then
+            error("unknown quest class")
+        end
+        local q = nc:GetQuest(cls)
+        if not valid(q) then
+            q = nc:BeginQuest(cls, FName("None"))
+        end
+        if not valid(q) then
+            error("BeginQuest returned nothing")
+        end
+        return q
+    end
+
+    coop.handlers.W = function(rest)
+        local path, branch = (rest or ""):match("^(/[%w_/%-]+%.[%w_%-]+) ([%w_%-]+)$")
+        if not path then
+            return
+        end
+        apply("quest step", "steps", path .. " " .. branch, function()
+            local q = questOf(path)
+            if q:GetQuestCompletion() == SUCCEEDED then
+                return
+            end
+            local b = q:GetBranch(FName(branch))
+            if not valid(b) then
+                error("no branch " .. branch)
+            end
+            if not b:IsCompleted() then
+                b:SucceedBranch()
+            end
+        end)
+    end
+
+    -- Lifts: their direction (Positive) is sent when it changes; the partner's lift is moved the same way.
+    sync.lifts = {}                 -- lift id -> Positive as last seen or set
+    local function watchLifts()
+        local _, pawn = api.getPlayer1()
+        local world = valid(pawn) and worldName(pawn)
+        if not world then
+            return
+        end
+        for _, a in ipairs(FindAllOf("BP_Lift_C") or {}) do
+            if valid(a) then
+                local id = world .. "-" .. a:GetFName():ToString()
+                local up = a.Positive == true
+                local was = sync.lifts[id]
+                sync.lifts[id] = up
+                if was ~= nil and was ~= up then
+                    coop.sendEvent("F", id, up and 1 or 0)
+                    sync.sent = sync.sent + 1
+                end
+            end
+        end
+    end
+
+    coop.handlers.F = function(rest)
+        local id, dir = (rest or ""):match("^([%w_%-%.]+) ([01])$")
+        if not (id and validId(id)) then
+            return
+        end
+        apply("lift", "lifts", id, function()
+            local lam = first("PBZLevelActorManager")
+            local a = lam and lam:GetActorByID(FName(id), StaticFindObject("/Script/Engine.Actor"))
+            if not valid(a) then
+                return                      -- not loaded here: it stays where this world left it
+            end
+            local up = dir == "1"
+            sync.lifts[id] = up             -- moved because of the partner: don't send it back
+            if (a.Positive == true) ~= up then
+                if up then
+                    a:DoPositiveAction()
+                else
+                    a:DoNegativeAction()
+                end
+            end
+        end)
+    end
+
     coop.handlers.J = function(rest)
         local store, id = (rest or ""):match("^(%a+) ([%w_%.%-]+)$")
         if not (store and EQUIP[store] and #id < 128) then
@@ -495,6 +614,9 @@ return function(api)
         if ticks % POLL_TICKS == 0 then
             poll()
             if sync.on and net.enabled then
+                pcall(watchLifts)
+            end
+            if sync.on and net.enabled then
                 local ok, err = pcall(applyPending)
                 if not ok then
                     log("Shared progress: chest / rubbish pile apply failed: " .. tostring(err))
@@ -506,13 +628,39 @@ return function(api)
     function sync.set(on)
         sync.on = on
         sync.known = nil
+        sync.askedCatchUp, sync.answeredCatchUp = false, false
         log("Shared progress " .. (on and "on" or "off") .. ".")
+    end
+
+    -- The partner asked for everything (catch-up): our whole known state, as the usual events, once per session.
+    local KINDS = { quests = "Q", bells = "L", mobs = "G", nodes = "N", codex = "X", actors = "A", equip = "J", steps = "W" }
+    coop.handlers.Z = function()
+        if not (sync.on and sync.known) or sync.answeredCatchUp then
+            return
+        end
+        sync.answeredCatchUp = true
+        local n = 0
+        for kind, key in pairs(KINDS) do
+            for id in pairs(sync.known[kind] or {}) do
+                coop.sendEvent(key, id)
+                n = n + 1
+            end
+        end
+        log("Shared progress: sent our whole progress to the partner (" .. n .. " entries, catch-up).")
+        if api.status and api.status.notify then
+            api.status.notify("catchup", "your partner is catching up with your progress.")
+        end
     end
 
     function sync.command(args)
         local a = (args or ""):lower()
         if a == "on" or a == "off" then
             sync.set(a == "on")
+            return
+        end
+        if a == "catchup" then
+            coop.sendEvent("Z")
+            log("Shared progress: asked the partner for their whole progress (catch-up).")
             return
         end
         local waiting = 0

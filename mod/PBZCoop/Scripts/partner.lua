@@ -4,8 +4,10 @@
 -- partner with the game's own teleport (PerformanceSystemSubsystem.TeleportToTargetPoint, the one that takes you
 -- from one area to another), so it works across areas and gets you past a gate only your partner has opened.
 --
--- Revive: while your partner is down, the regroup key revives them to your side ("Y" event): once they're back on
--- their feet (each player's death and respawn stay their own game's), they're teleported straight to you.
+-- Revive: while your partner is down, the regroup key revives them ("Y" event, with your position). Their game's
+-- revive point (PBZGameSystem.SetReviveTransform, checked in game) is set to your side, so the game's own revival
+-- brings them back right next to you instead of at their bell; their own revive point is put back afterwards. If
+-- the game revived them elsewhere anyway, they're teleported to you.
 --
 -- Dialogue: lines your character hears in a conversation (the game's PBZEventPipelineDialogWidget, its
 -- DialogueData.Text) are sent as "T <text>" and shown to your partner as tips.
@@ -67,8 +69,15 @@ return function(api)
         end
         local t = net.target
         if t.MaxHp and t.MaxHp > 0 and t.Hp and t.Hp <= 0 then
-            -- Partner down: the same key revives them to your side.
-            coop.sendEvent("Y")
+            -- Partner down: the same key revives them at your side.
+            local _, me = api.getPlayer1()
+            local l = valid(me) and me:K2_GetActorLocation()
+            if l then
+                coop.sendEvent("Y", string.format("%.0f", l.X), string.format("%.0f", l.Y), string.format("%.0f", l.Z),
+                    net.localMap or "?")
+            else
+                coop.sendEvent("Y")
+            end
             tip("regroup", "revive sent: your partner comes back to you once they're on their feet.")
             return
         end
@@ -204,8 +213,17 @@ return function(api)
                     partner.reviveAt = nil
                     game.after(REVIVE_DELAY_S, function()
                         ExecuteInGameThread(function()
+                            partner.restoreRevivePoint()
+                            -- Revived at the partner's side by the game itself; if not, teleport there.
+                            local t = net.target
+                            local _, me = api.getPlayer1()
+                            local l = valid(me) and me:K2_GetActorLocation()
+                            local near = t and l and t.Map == net.localMap
+                                and math.sqrt((l.X - t.X) ^ 2 + (l.Y - t.Y) ^ 2) < 3000
                             tip("self", "revived: back at your partner's side.")
-                            partner.regroup(true)
+                            if not near then
+                                partner.regroup(true)
+                            end
                         end)
                     end)
                 elseif fresh() then
@@ -215,9 +233,42 @@ return function(api)
         end
     end
 
-    coop.handlers.Y = function()
+    -- The game's revive point: read, set to the reviver's side, and put back after the revival.
+    local function gameSystem()
+        local gs = FindFirstOf("PBZGameSystem")
+        return valid(gs) and gs or nil
+    end
+
+    function partner.restoreRevivePoint()
+        local orig = partner.reviveOrig
+        partner.reviveOrig = nil
+        local gs = gameSystem()
+        if orig and gs then
+            pcall(function() gs:SetReviveTransform(orig) end)
+        end
+    end
+
+    coop.handlers.Y = function(rest)
         partner.reviveAt = os.clock()
-        tip("revive", "your partner is reviving you: you'll return to them when you're back on your feet.")
+        local x, y, z, map = (rest or ""):match("^(%S+) (%S+) (%S+) (%S+)$")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        local gs = gameSystem()
+        if gs and x and x == x and y and z and map == net.localMap then
+            pcall(function()
+                if not partner.reviveOrig then
+                    local t, cam = {}, {}
+                    gs:GetReviveTransform(t, cam)
+                    partner.reviveOrig = {
+                        Translation = { X = t.Translation.X, Y = t.Translation.Y, Z = t.Translation.Z },
+                        Rotation = { X = t.Rotation.X, Y = t.Rotation.Y, Z = t.Rotation.Z, W = t.Rotation.W },
+                        Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
+                    }
+                end
+                gs:SetReviveTransform({ Translation = { X = x + 0.0, Y = y + 0.0, Z = z + 50.0 },
+                    Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 }, Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 } })
+            end)
+        end
+        tip("revive", "your partner is reviving you: you'll get back up at their side.")
     end
 
     -- Dialogue: the line in a visible dialogue widget, sent once each.

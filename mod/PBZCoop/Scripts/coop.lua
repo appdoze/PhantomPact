@@ -41,7 +41,8 @@ return function(api)
     local PREDICT_MAX_SPEED = 2500 -- cm/s; faster between two snapshots is a teleport, not movement
     local PREDICT_BLEND = 0.5     -- weight of the newest velocity sample (smooths jitter)
     local ENEMY_RADIUS_CM = 6000  -- host shares enemies within this distance of its player
-    local ENEMY_SNAP_CM = 400     -- client teleports a mirrored enemy that is further than this from the host's
+    -- How a mirrored enemy follows the host's copy on the client (glide, or jump across a big gap).
+    local smoothEnemy = dofile(api.modRoot() .. "Scripts/smoothing.lua")
     local ENEMY_MATCH_CM = 2000   -- client: a same-class enemy this close stands in for a host enemy with another id
     local PICKUP_EVERY = 10       -- snapshots between pickup scans (0.5 s)
     local AGGRO_EVERY = 20        -- snapshots between ghost aggro refreshes (1 s)
@@ -540,10 +541,13 @@ return function(api)
                 end
                 local r = net.remoteEnemies[name]
                 if r then
-                    local cur = actor:K2_GetActorLocation()
-                    if distance(cur, r) > ENEMY_SNAP_CM then
-                        actor:K2_SetActorLocationAndRotation({ X = r.X, Y = r.Y, Z = r.Z },
+                    -- Glide back toward the host's position; jump only across a big gap (smoothing.lua).
+                    local x, y, z, snap = smoothEnemy(actor:K2_GetActorLocation(), r)
+                    if snap then
+                        actor:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z },
                             { Pitch = 0.0, Yaw = r.Yaw, Roll = 0.0 }, false, {}, true)
+                    elseif x then
+                        actor:K2_SetActorLocation({ X = x, Y = y, Z = z }, false, {}, true)
                     end
                     if game.setHealth and r.Hp ~= nil and hp ~= nil and r.Hp < hp - 0.5 then
                         game.setHealth(actor, r.Hp)
