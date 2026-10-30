@@ -71,15 +71,59 @@ def fine_timer():
             pass
 
 
-def read_secret(folder, path=None):
-    """The shared secret: --secret-file, else "Secret = ..." in PhantomPact.ini next to the mod. Empty = off."""
-    if path:
-        return read_text(path).strip()
+def mod_ini_path(folder):
     ini = os.path.join(folder, "PhantomPact.ini")
     if not os.path.exists(ini):
         # Extra test instances run in <mod>/inst<n>/; the ini lives in the mod folder above.
         ini = os.path.join(os.path.dirname(os.path.normpath(folder)), "PhantomPact.ini")
-    for line in read_text(ini).splitlines():
+    return ini
+
+
+def read_ini(folder):
+    """PhantomPact.ini as {lowercase key: value}, comments stripped."""
+    out = {}
+    for line in read_text(mod_ini_path(folder)).splitlines():
+        if line.lstrip().startswith(";"):
+            continue
+        key, sep, value = line.partition("=")
+        if sep:
+            out[key.strip().lower()] = value.split(";", 1)[0].strip()
+    return out
+
+
+# Settings both players must agree on; compared in the "hello" exchange and reported as mismatch= in the status.
+SHARED_SETTINGS = ("network", "coopenemyhealth", "coopenemyposture", "shareprogress", "pvp", "pvpdamage",
+                   "pvpparryposture")
+
+
+def mod_version(folder):
+    """VERSION from Scripts/main.lua next to the relay (or the mod folder above an instance folder)."""
+    for base in (folder, os.path.dirname(os.path.normpath(folder))):
+        for rel in (("Scripts", "main.lua"), ("mod", "PBZCoop", "Scripts", "main.lua")):
+            text = read_text(os.path.join(base, *rel))
+            marker = 'local VERSION = "'
+            if marker in text:
+                return text.split(marker, 1)[1].split('"', 1)[0]
+    return "?"
+
+
+def compare_settings(mine, theirs):
+    """Differences between two hello payloads as "key=mine/theirs" strings."""
+    diffs = []
+    if mine.get("ver") != theirs.get("ver"):
+        diffs.append(f"version={mine.get('ver')}/{theirs.get('ver')}")
+    a, b = mine.get("cfg") or {}, theirs.get("cfg") or {}
+    for key in SHARED_SETTINGS:
+        if str(a.get(key, "")).lower() != str(b.get(key, "")).lower():
+            diffs.append(f"{key}={a.get(key, '') or '-'}/{b.get(key, '') or '-'}")
+    return diffs
+
+
+def read_secret(folder, path=None):
+    """The shared secret: --secret-file, else "Secret = ..." in PhantomPact.ini next to the mod. Empty = off."""
+    if path:
+        return read_text(path).strip()
+    for line in read_text(mod_ini_path(folder)).splitlines():
         key, sep, value = line.partition("=")
         if sep and key.strip().lower() == "secret":
             value = value.split(";", 1)[0].strip()
@@ -88,32 +132,146 @@ def read_secret(folder, path=None):
     return ""
 
 
+class AesGcm:
+    """AES-256-GCM through Windows' own crypto library (CNG, bcrypt.dll): Python's standard library has no
+    authenticated cipher, and the game only runs on Windows. Raises OSError where CNG isn't available."""
+
+    TAG = 16
+    STATUS_AUTH_TAG_MISMATCH = 0xC000A002
+
+    def __init__(self, key):
+        import ctypes
+        from ctypes import wintypes
+        self.ct = ctypes
+        if os.name != "nt":
+            raise OSError("CNG needs Windows")
+        bc = self.bc = ctypes.WinDLL("bcrypt")
+
+        class Info(ctypes.Structure):    # BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO
+            _fields_ = [("cbSize", wintypes.ULONG), ("dwInfoVersion", wintypes.ULONG),
+                        ("pbNonce", ctypes.c_void_p), ("cbNonce", wintypes.ULONG),
+                        ("pbAuthData", ctypes.c_void_p), ("cbAuthData", wintypes.ULONG),
+                        ("pbTag", ctypes.c_void_p), ("cbTag", wintypes.ULONG),
+                        ("pbMacContext", ctypes.c_void_p), ("cbMacContext", wintypes.ULONG),
+                        ("cbAAD", wintypes.ULONG), ("cbData", ctypes.c_ulonglong), ("dwFlags", wintypes.ULONG)]
+        self.Info = Info
+        alg = ctypes.c_void_p()
+        self.check(bc.BCryptOpenAlgorithmProvider(ctypes.byref(alg), ctypes.c_wchar_p("AES"), None, 0))
+        mode = ctypes.create_unicode_buffer("ChainingModeGCM")
+        self.check(bc.BCryptSetProperty(alg, ctypes.c_wchar_p("ChainingMode"), mode, ctypes.sizeof(mode), 0))
+        self.key = ctypes.c_void_p()
+        kb = ctypes.create_string_buffer(key, len(key))
+        self.check(bc.BCryptGenerateSymmetricKey(alg, ctypes.byref(self.key), None, 0, kb, len(key), 0))
+        self.alg = alg
+
+    @staticmethod
+    def check(status):
+        if status != 0:
+            raise OSError(f"CNG error 0x{status & 0xFFFFFFFF:08X}")
+
+    def _info(self, nonce, aad, tag):
+        i = self.Info()
+        i.cbSize, i.dwInfoVersion = self.ct.sizeof(i), 1
+        i.pbNonce, i.cbNonce = self.ct.cast(nonce, self.ct.c_void_p), len(nonce)
+        i.pbAuthData, i.cbAuthData = self.ct.cast(aad, self.ct.c_void_p), len(aad)
+        i.pbTag, i.cbTag = self.ct.cast(tag, self.ct.c_void_p), self.TAG
+        return i
+
+    def encrypt(self, nonce, plaintext, aad):
+        ct = self.ct
+        n, a = ct.create_string_buffer(nonce, len(nonce)), ct.create_string_buffer(aad, len(aad))
+        tag = ct.create_string_buffer(self.TAG)
+        info = self._info(n, a, tag)
+        src = ct.create_string_buffer(plaintext, len(plaintext))
+        out = ct.create_string_buffer(len(plaintext))
+        done = ct.c_ulong()
+        self.check(self.bc.BCryptEncrypt(self.key, src, len(plaintext), ct.byref(info), None, 0, out,
+                                         len(plaintext), ct.byref(done), 0))
+        return out.raw[:done.value] + tag.raw
+
+    def decrypt(self, nonce, data, aad):
+        """Plaintext, or None if the tag doesn't match (wrong key, modified packet)."""
+        ct = self.ct
+        if len(data) < self.TAG:
+            return None
+        body, tag_bytes = data[:-self.TAG], data[-self.TAG:]
+        n, a = ct.create_string_buffer(nonce, len(nonce)), ct.create_string_buffer(aad, len(aad))
+        tag = ct.create_string_buffer(tag_bytes, self.TAG)
+        info = self._info(n, a, tag)
+        src = ct.create_string_buffer(body, len(body))
+        out = ct.create_string_buffer(max(len(body), 1))
+        done = ct.c_ulong()
+        status = self.bc.BCryptDecrypt(self.key, src, len(body), ct.byref(info), None, 0, out, len(body),
+                                       ct.byref(done), 0)
+        if status != 0:
+            return None
+        return out.raw[:done.value]
+
+
 class Auth:
-    """Optional packet authentication with a secret both players share.
+    """Optional packet protection with a secret both players share.
 
-    Every packet carries the sender's random session id and a counter and is signed with HMAC-SHA256; packets with
-    a bad signature, from another protocol, or replayed (counter not above the last one seen for that session) are
-    dropped. Without a secret packets are unsigned (and only the address filter applies)."""
+    On Windows (where the game runs) every packet is encrypted and authenticated with AES-256-GCM (Windows CNG);
+    elsewhere it is signed with HMAC-SHA256. Either way it carries the sender's random session id and a counter, and
+    packets with a bad tag, from another protocol, or replayed (counter not above the last one seen for that session)
+    are dropped. Without a secret packets are plain (and only the address filter applies)."""
 
-    def __init__(self, secret):
+    AAD = b"PhantomPact/2"
+
+    def __init__(self, secret, encrypt=True):
         self.key = hashlib.sha256(secret.encode()).digest() if secret else None
+        self.aead = None
+        if self.key is not None and encrypt and os.name == "nt":
+            try:
+                self.aead = AesGcm(self.key)
+            except (OSError, AttributeError):
+                self.aead = None
         self.sid = secrets.token_hex(8)
+        self.sid_bytes = secrets.token_bytes(6)
         self.counter = 0
         self.seen = collections.OrderedDict()   # peer session id -> highest counter accepted
         self.rejected = 0
+
+    @property
+    def mode(self):
+        return "aes-gcm" if self.aead else ("hmac" if self.key else "off")
 
     def seal(self, msg):
         if self.key is None:
             return json.dumps(msg, separators=(",", ":")).encode()
         self.counter += 1
+        if self.aead:
+            nonce = self.sid_bytes + self.counter.to_bytes(6, "big")
+            body = json.dumps(msg, separators=(",", ":")).encode()
+            return b"E" + nonce + self.aead.encrypt(nonce, body, self.AAD)
         msg["a"] = self.sid
         msg["n"] = self.counter
         body = json.dumps(msg, separators=(",", ":")).encode()
         return body + b"\n" + hmac.new(self.key, body, hashlib.sha256).digest()[:MAC_BYTES].hex().encode()
 
+    def _fresh(self, sid, n):
+        """Replay check: the counter must grow within each sender session."""
+        if n <= self.seen.get(sid, 0):
+            return False
+        self.seen[sid] = n
+        self.seen.move_to_end(sid)
+        while len(self.seen) > REPLAY_SESSIONS:
+            self.seen.popitem(last=False)
+        return True
+
     def open(self, data):
         """The message dict, or None if the packet must be dropped."""
-        if self.key is None:
+        if self.aead:
+            # Encrypted only: a plain or HMAC packet is refused, so nobody can downgrade the session.
+            if data[:1] != b"E" or len(data) < 13 + AesGcm.TAG:
+                self.rejected += 1
+                return None
+            nonce = data[1:13]
+            body = self.aead.decrypt(nonce, data[13:], self.AAD)
+            if body is None or not self._fresh(nonce[:6].hex(), int.from_bytes(nonce[6:], "big")):
+                self.rejected += 1
+                return None
+        elif self.key is None:
             body = data
         else:
             body, sep, mac = data.rpartition(b"\n")
@@ -129,15 +287,11 @@ class Auth:
         if not isinstance(msg, dict):
             self.rejected += 1
             return None
-        if self.key is not None:
+        if self.key is not None and not self.aead:
             sid, n = msg.get("a"), msg.get("n")
-            if not isinstance(sid, str) or not isinstance(n, int) or n <= self.seen.get(sid, 0):
+            if not isinstance(sid, str) or not isinstance(n, int) or not self._fresh(sid, n):
                 self.rejected += 1
                 return None
-            self.seen[sid] = n
-            self.seen.move_to_end(sid)
-            while len(self.seen) > REPLAY_SESSIONS:
-                self.seen.popitem(last=False)
         return msg
 
 
@@ -401,6 +555,7 @@ SEND_NO_NAGLE = 1           # k_nSteamNetworkingSend_NoNagle (unreliable): snaps
 SEND_AUTO_RESTART = 32      # k_nSteamNetworkingSend_AutoRestartBrokenSession
 IDENTITY_BYTES = 136        # sizeof(SteamNetworkingIdentity)
 IDENTITY_STEAMID = 16       # k_ESteamNetworkingIdentityType_SteamID
+FRIEND_FLAG_IMMEDIATE = 4   # k_EFriendFlagImmediate: regular friends
 
 
 class SteamTransport:
@@ -410,7 +565,10 @@ class SteamTransport:
 
     name = "steam"
 
-    def __init__(self, dll_path, partner_id):
+    PRESENCE_KEY = b"phantompact"   # Steam rich presence: our role, so a friend's relay can find us
+    FIND_EVERY = 2.0                # seconds between friend-list scans while looking for the partner
+
+    def __init__(self, dll_path, partner_id, role="host"):
         import ctypes
         from ctypes import c_bool, c_char_p, c_int, c_int64, c_uint32, c_uint64, c_void_p, POINTER
         self.ct = ctypes
@@ -440,25 +598,59 @@ class SteamTransport:
             ("SteamAPI_SteamNetworkingMessage_t_Release", None, [c_void_p]),
             ("SteamAPI_RunCallbacks", None, []),
             ("SteamAPI_Shutdown", None, []),
+            ("SteamAPI_SteamFriends_v018", c_void_p, []),
+            ("SteamAPI_ISteamFriends_SetRichPresence", c_bool, [c_void_p, c_char_p, c_char_p]),
+            ("SteamAPI_ISteamFriends_GetFriendCount", c_int, [c_void_p, c_int]),
+            ("SteamAPI_ISteamFriends_GetFriendByIndex", c_uint64, [c_void_p, c_int, c_int]),
+            ("SteamAPI_ISteamFriends_GetFriendRichPresence", c_char_p, [c_void_p, c_uint64, c_char_p]),
+            ("SteamAPI_ISteamFriends_GetFriendPersonaName", c_char_p, [c_void_p, c_uint64]),
         ]:
             f = getattr(api, fn)
             f.restype, f.argtypes = res, args
         self.my_id = api.SteamAPI_ISteamUser_GetSteamID(api.SteamAPI_SteamUser_v023())
         api.SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess(api.SteamAPI_SteamNetworkingUtils_SteamAPI_v004())
         self.msgs = api.SteamAPI_SteamNetworkingMessages_SteamAPI_v002()
-        self.partner = int(partner_id)
+        self.friends = api.SteamAPI_SteamFriends_v018()
+        self.role = role
+        # Advertise our role; friends playing PBZ see it, which is how PartnerSteamID = Auto finds the partner.
+        api.SteamAPI_ISteamFriends_SetRichPresence(self.friends, self.PRESENCE_KEY, role.encode())
         self.identity = ctypes.create_string_buffer(IDENTITY_BYTES)
-        api.SteamAPI_SteamNetworkingIdentity_SetSteamID64(self.identity, self.partner)
-        # Sending to the partner accepts their session too; accept explicitly as well in case they spoke first.
-        api.SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser(self.msgs, self.identity)
-        self.peer = ("steam", self.partner)
+        self.partner, self.peer, self.partner_name = None, None, ""
+        self.last_find = 0.0
+        if str(partner_id).lower() != "auto":
+            self.set_partner(int(partner_id))
         self.out = (c_void_p * 64)()
         self.last_result = None
+
+    def set_partner(self, steam_id, name=""):
+        self.partner = steam_id
+        self.partner_name = name
+        self.api.SteamAPI_SteamNetworkingIdentity_SetSteamID64(self.identity, steam_id)
+        # Sending to the partner accepts their session too; accept explicitly as well in case they spoke first.
+        self.api.SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser(self.msgs, self.identity)
+        self.peer = ("steam", steam_id)
+
+    def find_partner(self):
+        """PartnerSteamID = Auto: the first Steam friend whose Phantom Pact relay advertises the other role (a host
+        looks for a client and the other way round). Rich presence is only visible for friends in the same game."""
+        want = b"client" if self.role == "host" else b"host"
+        api = self.api
+        count = api.SteamAPI_ISteamFriends_GetFriendCount(self.friends, FRIEND_FLAG_IMMEDIATE)
+        for i in range(max(0, count)):
+            fid = api.SteamAPI_ISteamFriends_GetFriendByIndex(self.friends, i, FRIEND_FLAG_IMMEDIATE)
+            if api.SteamAPI_ISteamFriends_GetFriendRichPresence(self.friends, fid, self.PRESENCE_KEY) == want:
+                name = (api.SteamAPI_ISteamFriends_GetFriendPersonaName(self.friends, fid) or b"").decode(
+                    "utf-8", "replace")
+                self.set_partner(fid, name)
+                return True
+        return False
 
     def fileno(self):
         return None
 
     def send(self, data, peer):
+        if self.partner is None:
+            return                  # PartnerSteamID = Auto, partner not found yet
         buf = self.ct.create_string_buffer(data, len(data))
         self.last_result = self.api.SteamAPI_ISteamNetworkingMessages_SendMessageToUser(
             self.msgs, self.identity, buf, len(data), SEND_NO_NAGLE | SEND_AUTO_RESTART, STEAM_CHANNEL)
@@ -480,6 +672,9 @@ class SteamTransport:
 
     def poll(self):
         self.api.SteamAPI_RunCallbacks()
+        if self.partner is None and time.monotonic() - self.last_find >= self.FIND_EVERY:
+            self.last_find = time.monotonic()
+            self.find_partner()
 
     def close(self):
         # No SteamAPI_Shutdown: called while the networking thread is still flushing it sometimes ends the process
@@ -512,8 +707,14 @@ class Relay:
         self.acked = {}                   # our session -> highest event id the peer confirmed
         self.events_acked = 0
         self.in_blanked = False           # net_in.txt emptied because the peer went silent
+        ini = read_ini(folder)
+        self.hello = {"t": "hello", "ver": mod_version(folder), "cfg": {k: ini.get(k, "") for k in SHARED_SETTINGS}}
+        self.partner_version = None
+        self.mismatch = []                # "key=mine/theirs" from the partner's hello
 
     def send(self, msg):
+        if self.transport.name == "steam":
+            self.peer = self.transport.peer          # may have just been found (PartnerSteamID = Auto)
         if self.peer is None:
             return
         msg["v"] = PROTOCOL
@@ -528,7 +729,8 @@ class Relay:
             # The client only listens to the host it was given; the host only to allowed networks. Over Steam the
             # sender is the authenticated SteamID and only the configured partner is accepted.
             if self.transport.name == "steam":
-                if addr != self.peer:
+                self.peer = self.transport.peer      # may have just been found (PartnerSteamID = Auto)
+                if self.peer is None or addr != self.peer:
                     self.filtered += 1
                     continue
             elif (self.role != "host" and addr != self.peer) or not address_allowed(addr, self.allowed):
@@ -546,7 +748,10 @@ class Relay:
             self.last_heard = now
             self.received += 1
             kind = msg.get("t")
-            if kind == "ping":
+            if kind == "hello" and isinstance(msg.get("cfg"), dict):
+                self.partner_version = str(msg.get("ver"))
+                self.mismatch = compare_settings(self.hello, msg)
+            elif kind == "ping":
                 self.send({"t": "pong", "ts": msg.get("ts")})
             elif kind == "pong" and isinstance(msg.get("ts"), (int, float)):
                 self.rtt_ms = (now - msg["ts"]) * 1000.0
@@ -606,6 +811,7 @@ class Relay:
                 self.in_blanked = True
         if now - self.last_ping >= PING_EVERY:
             self.send({"t": "ping", "ts": now})
+            self.send(dict(self.hello))
             self.last_ping = now
         if now - self.last_sent_at >= TICK * 0.9:
             self.send_state(now)
@@ -635,8 +841,10 @@ class Relay:
         # time= (wall clock) lets the mod tell a running relay from a stale status file before starting another.
         return (f"role={self.role} connected={'yes' if connected else 'no'} peer={peer} "
                 f"rtt_ms={rtt} sent={self.sent} received={self.received} "
+                f"version={self.hello['ver']} partner_version={self.partner_version or '-'} "
+                f"mismatch={','.join(self.mismatch) or '-'} "
                 f"events_acked={self.events_acked} events_in={self.inbox.last_id} "
-                f"auth={'on' if self.auth.key else 'off'} rejected={self.auth.rejected} filtered={self.filtered} "
+                f"auth={self.auth.mode} rejected={self.auth.rejected} filtered={self.filtered} "
                 f"{self.extra_status + ' ' if self.extra_status else ''}time={int(time.time())}")
 
 
@@ -824,8 +1032,9 @@ def main():
     args = ap.parse_args()
     if args.role == "client" and args.transport == "udp" and not args.peer:
         ap.error("client needs --peer <host IP>")
-    if args.transport == "steam" and not (args.partner and args.partner.isdigit() and args.steam_dll):
-        ap.error("steam needs --partner <SteamID64> and --steam-dll <path>")
+    if args.transport == "steam" and not (args.partner and (args.partner.isdigit() or args.partner.lower() == "auto")
+                                          and args.steam_dll):
+        ap.error("steam needs --partner <SteamID64 | auto> and --steam-dll <path>")
     os.makedirs(args.dir, exist_ok=True)
     if args.role == "echo":
         run_echo(args.dir, args.seconds)
@@ -850,14 +1059,14 @@ def main():
     transport, mapping = None, None
     if args.transport == "steam":
         try:
-            transport = SteamTransport(args.steam_dll, args.partner)
+            transport = SteamTransport(args.steam_dll, args.partner, role=args.role)
         except OSError as e:
             write_atomic(status_path, f"role={args.role} connected=no error=steam-init time={int(time.time())}\n")
             print(f"Steam networking unavailable: {e}", flush=True)
             raise SystemExit(3)
     relay = Relay(args.role, args.dir, args.peer, args.port, secret=secret, allow=args.allow, transport=transport)
     if transport is not None:
-        relay.extra_status = f"transport=steam me={transport.my_id} partner={transport.partner}"
+        relay.extra_status = f"transport=steam me={transport.my_id} partner={transport.partner or 'searching'}"
     if args.upnp and args.role == "host" and args.transport == "udp":
         try:
             mapping = PortMapping(args.port, args.upnp_location)
@@ -866,7 +1075,7 @@ def main():
             relay.extra_status = "upnp=failed"
             print(f"UPnP port forwarding failed ({e}); forward UDP {args.port} on the router by hand", flush=True)
     print(f"PBZCoop relay {args.role} over {args.transport} (port {args.port}), files in {args.dir}, "
-          f"auth {'on' if secret else 'off (set Secret in PhantomPact.ini)'}, allow {args.allow} "
+          f"auth {relay.auth.mode if secret else 'off (set Secret in PhantomPact.ini)'}, allow {args.allow} "
           f"{relay.extra_status}", flush=True)
     start = time.monotonic()
     last_status = 0.0
@@ -886,6 +1095,9 @@ def main():
                 break
             if mapping:
                 mapping.keep_alive(now)
+            if transport is not None:
+                who = transport.partner and f"{transport.partner}" or "searching"
+                relay.extra_status = f"transport=steam me={transport.my_id} partner={who}"
             relay.wait(TICK)
     except KeyboardInterrupt:
         pass

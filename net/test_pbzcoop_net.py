@@ -214,6 +214,30 @@ class Security(unittest.TestCase):
         self.assertIsNone(b.open(pbzcoop_net.Auth("").seal({"t": "ping"})), "an unsigned packet is dropped")
         self.assertEqual(b.rejected, 3)
 
+    def test_hmac_mode_also_drops_tampering_and_replay(self):
+        a, b = pbzcoop_net.Auth("k", encrypt=False), pbzcoop_net.Auth("k", encrypt=False)
+        self.assertEqual(a.mode, "hmac")
+        p = a.seal({"t": "ping"})
+        self.assertIsNotNone(b.open(p))
+        self.assertIsNone(b.open(p))
+
+    @unittest.skipUnless(os.name == "nt", "AES-GCM uses Windows CNG")
+    def test_aes_gcm_encrypts_and_rejects_plaintext_and_downgrade(self):
+        a, b = pbzcoop_net.Auth("k"), pbzcoop_net.Auth("k")
+        self.assertEqual(a.mode, "aes-gcm")
+        p = a.seal({"t": "state", "s": "P 1 secret-position"})
+        self.assertNotIn(b"secret-position", p, "the payload is encrypted")
+        self.assertEqual(b.open(p)["s"], "P 1 secret-position")
+        self.assertIsNone(b.open(p), "replay")
+        self.assertIsNone(b.open(pbzcoop_net.Auth("k", encrypt=False).seal({"t": "ping"})), "HMAC downgrade refused")
+        self.assertIsNone(b.open(b'{"t":"ping","v":2}'), "plain refused")
+        q = bytearray(a.seal({"t": "ping"}))
+        q[-1] ^= 1
+        self.assertIsNone(b.open(bytes(q)), "tag mismatch")
+        # Known-answer check of the CNG wrapper (NIST GCM test case 13: 256-bit zero key, zero nonce, empty input).
+        g = pbzcoop_net.AesGcm(bytes(32))
+        self.assertEqual(g.encrypt(bytes(12), b"", b"").hex(), "530f8afbc74536b9a963b4f1c4cb738b")
+
     def test_address_filter(self):
         ts = pbzcoop_net.ALLOWED_NETWORKS["tailscale"]
         self.assertTrue(pbzcoop_net.address_allowed(("100.101.102.103", 1), ts))
@@ -252,7 +276,8 @@ class SecureLoopback(RelayLoopback):
         self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
         self.assertTrue(wait_for(lambda: read(os.path.join(self.b, "net_in.txt")).startswith("P 1")))
         self.assertTrue(wait_for(lambda: read(os.path.join(self.a, "net_in.txt")).startswith("P 2")))
-        self.assertTrue(wait_for(lambda: self.status(self.a).get("auth") == "on"))
+        want = "aes-gcm" if os.name == "nt" else "hmac"
+        self.assertTrue(wait_for(lambda: self.status(self.a).get("auth") == want), self.status(self.a))
 
     def test_wrong_secret_never_connects(self):
         self.secret(self.a, "s3cret")
@@ -280,6 +305,28 @@ class SecureLoopback(RelayLoopback):
         stranger.close()
         self.assertTrue(wait_for(lambda: int(self.status(self.b).get("filtered", 0)) >= 1))
         self.assertEqual(read(os.path.join(self.b, "net_in.txt")), "")
+
+
+class Handshake(RelayLoopback):
+    def status(self, folder):
+        return dict(kv.split("=", 1) for kv in read(os.path.join(folder, "net_status.txt")).split() if "=" in kv)
+
+    def test_settings_that_differ_are_reported_on_both_sides(self):
+        write(os.path.join(self.a, "PhantomPact.ini"), "CoopEnemyHealth = 150\nPvP = On\nNetwork = Tailscale\n")
+        write(os.path.join(self.b, "PhantomPact.ini"), "CoopEnemyHealth = 100\nPvP = on\nNetwork = Tailscale\n")
+        self.start("host", "--dir", self.a, "--port", str(PORT))
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
+        self.assertTrue(wait_for(lambda: self.status(self.a).get("mismatch", "-") != "-", timeout=8))
+        self.assertEqual(self.status(self.a)["mismatch"], "coopenemyhealth=150/100", "PvP On/on is the same setting")
+        self.assertTrue(wait_for(lambda: self.status(self.b).get("mismatch") == "coopenemyhealth=100/150", timeout=8))
+
+    def test_same_settings_report_no_mismatch(self):
+        for d in (self.a, self.b):
+            write(os.path.join(d, "PhantomPact.ini"), "CoopEnemyHealth = 150\n")
+        self.start("host", "--dir", self.a, "--port", str(PORT))
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
+        self.assertTrue(wait_for(lambda: self.status(self.a).get("partner_version", "-") != "-", timeout=8))
+        self.assertEqual(self.status(self.a).get("mismatch"), "-")
 
 
 class Direct(unittest.TestCase):
@@ -369,6 +416,7 @@ class Steam(unittest.TestCase):
 
 
 class Latency(RelayLoopback):
+    @unittest.skipIf(os.environ.get("GITHUB_ACTIONS"), "timing on shared CI runners is too noisy")
     def test_new_snapshots_go_out_immediately(self):
         a_out, b_in = os.path.join(self.a, "net_out.txt"), os.path.join(self.b, "net_in.txt")
         write(a_out, "P 0 0 0 0 0 0 0\n")
