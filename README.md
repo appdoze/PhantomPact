@@ -21,6 +21,9 @@ share loot and dust, and rest at bells together. The host's world leads, and you
 - Shared resting: rest at a bell and enemies respawn for both
 - Elden Ring–style co-op difficulty: enemies and bosses get more health and posture while you play together
 - PvP duels (`PvP = On`): the game's own block, parry and dodge; parries stagger the attacker; the loser dies
+- A partner compass in the game's ink style, partner tips, and spectating your partner while you're down
+- Optional `Secret` that signs every packet; works over Tailscale, Hamachi, Radmin, ZeroTier, UU Accelerator, and
+  Steam (beta)
 
 ## Quick start
 
@@ -30,7 +33,7 @@ share loot and dust, and rest at bells together. The host's world leads, and you
    the host's Tailscale IP.
 4. Start the game and load your saves, the host first. Co-op starts by itself.
 
-Early release, 2 players. Connecting is over Tailscale for now; Steam joining is planned.
+Early release, 2 players. Tailscale or any virtual LAN; Steam joining is in beta (see INSTALL.md).
 
 ## Ground rules
 

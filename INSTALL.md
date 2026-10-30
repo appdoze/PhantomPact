@@ -1,4 +1,4 @@
-# Phantom Pact 1.2.0: online co-op for Phantom Blade Zero
+# Phantom Pact 1.3.0: online co-op for Phantom Blade Zero
 
 Play the campaign with a friend: you see each other as a second Soul, fight the same enemies and bosses, and
 share loot, dust and bell rests. The host's world decides enemies, bosses and deaths; the guest's world follows.
@@ -34,6 +34,23 @@ The UE4SS console shows `Phantom Pact Host: co-op on` (or Guest), and
 - **Playing alone:** set `Role = Off`.
 - **Uninstalling:** delete the `platform\steam\ue4ss\Mods\PBZCoop` folder.
 
+## Other ways to connect
+
+- **Hamachi, Radmin, ZeroTier, UU Accelerator's multiplayer:** any virtual LAN works. The guest puts the host's
+  address from that app in `HostAddress` (leave `Connect = Tailscale`: it just means "connect by IP"). If the app
+  hands out unusual addresses (UU, ZeroTier), the host also sets `AllowAnyAddress = On`.
+- **Steam (beta):** both set `Connect = Steam`; the guest joins a Steam friend who's hosting. No Tailscale needed.
+  Not yet tested between two players, so tell us how it goes.
+- **Secret (optional):** the same password in `Secret =` on both PCs signs every packet, so nobody else on the
+  network can join. Recommended with `AllowAnyAddress = On`.
+
+## On screen
+
+- **Partner compass:** a silver seal on a line at the top shows which way your partner is. Turn it off with
+  `PartnerCompass = Off`.
+- **Tips:** short messages when your partner connects, drops, goes down, gets low or wanders far off.
+- **When you die:** after a few seconds the camera follows your partner until you respawn.
+
 ## Co-op difficulty
 
 Like Elden Ring, enemies and bosses get tougher while your partner is with you: 150% health and 130% posture by
@@ -54,13 +71,14 @@ Both players set `PvP = On` in `PhantomPact.ini`. Your partner becomes an oppone
 - Both players fight with the same strength (your partner's ghost uses your stats), so skill decides.
   `PvPDamage` scales the damage you take (100 = normal).
 
-Not in PvP yet: executions (posture break only staggers), and you don't see your partner's guard pose.
+Not in PvP yet: executions (posture break only staggers).
 
 ## Good to know
 
 - The host should lead into new areas and boss arenas; the guest follows.
-- If your partner disappears, they are down or on another map; they come back.
-- Not shared yet: cutscenes, dialogue, spending dust.
+- If your partner disappears, they are down, in a cutscene, on another map or disconnected; they come back.
+- If the guest dies during a boss fight, the host's fight goes on; the host's win counts for both.
+- Not shared yet: cutscenes, dialogue, spending dust, quests and story progress.
 - Never press Ctrl+R (UE4SS hot reload) while playing together: it can crash the game. Restart the game instead.
 
 ## Troubleshooting
