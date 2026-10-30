@@ -1,5 +1,5 @@
 -- Phantom Pact auto-start: reads PhantomPact.ini, starts the network relay (net/pbzcoop_net.py, with the
--- player's own Python) when the game starts, and turns online sync on once the player is in gameplay.
+-- Python bundled in PBZCoop\python, else the player's own) when the game starts, and turns online sync on once the player is in gameplay.
 -- Players only edit the ini; nothing to run by hand.
 --
 -- The relay stops by itself when the game closes: this file rewrites net_alive.txt every few seconds and the
@@ -135,13 +135,23 @@ return function(api)
         if modRole == "client" and hostAddress ~= "" then
             args = args .. ' --peer "' .. hostAddress .. '"'
         end
-        -- pyw/pythonw: Python without a console window. The py launcher comes with python.org installs; plain
-        -- pythonw covers the rest. "start" returns at once, so the game doesn't wait.
-        local cmd = string.format('where pyw >nul 2>nul && (start "" pyw -3 %s) || (where pythonw >nul 2>nul && start "" pythonw %s)',
-            args, args)
+        -- pythonw: Python without a console window. The release zip carries Python's own embeddable build in
+        -- PBZCoop\python, so players install nothing; without it, the player's Python (the py launcher from
+        -- python.org installs, else pythonw on PATH). "start" returns at once, so the game doesn't wait.
+        local bundled = (modRoot() .. "python/pythonw.exe"):gsub("/", "\\")
+        local cmd
+        local f = io.open(bundled, "rb")
+        local which = f and "bundled Python" or "your Python"
+        if f then
+            f:close()
+            cmd = string.format('start "" "%s" %s', bundled, args)
+        else
+            cmd = string.format('where pyw >nul 2>nul && (start "" pyw -3 %s) || (where pythonw >nul 2>nul && start "" pythonw %s)',
+                args, args)
+        end
         local ok = os.execute(cmd)
         if not ok then
-            log("Couldn't start the relay: Python 3 wasn't found. Install it from python.org (tick \"Add python to PATH\") and restart the game.")
+            log("Couldn't start the relay: Python wasn't found. Reinstall Phantom Pact (the zip includes it) and restart the game.")
             return false
         end
         local joining = modRole ~= "client" and ""
@@ -150,7 +160,7 @@ return function(api)
         local secret = settings.secret or ""
         local signed = secret ~= "" and not secret:upper():find("^PUT%-") and secret:lower() ~= "off"
         log("Relay started as " .. role .. joining .. (steam and " over Steam" or (" on UDP " .. port))
-            .. (signed and ", packets signed (Secret set)." or "."))
+            .. (signed and ", packets signed (Secret set)" or "") .. " (" .. which .. ").")
         return true
     end
 

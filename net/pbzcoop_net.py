@@ -667,8 +667,10 @@ def fine_timer(on):
 
 def game_alive(path, timeout):
     """The mod rewrites its heartbeat file (a unix time) every few seconds while the game runs."""
+    # The mod truncates the file, then writes: an empty or unreadable file is a write in progress, not a stop.
+    # Read as 0 it used to look 56 years stale, and the relay quit while the game was still running.
     try:
-        beat = float(read_text(path).strip() or 0)
+        beat = float(read_text(path).strip())
     except ValueError:
         return True       # caught mid-write
     return time.time() - beat <= timeout
@@ -742,6 +744,11 @@ def main():
             relay.wait(TICK)
     except KeyboardInterrupt:
         pass
+    except Exception:
+        # Started with pythonw there's no console, so a crash would leave no trace: keep it next to the status.
+        import traceback
+        write_atomic(os.path.join(args.dir, "relay_error.txt"), traceback.format_exc())
+        raise
     finally:
         fine_timer(False)
         write_atomic(relay.status_path, f"role={args.role} connected=no stopped=yes\n")

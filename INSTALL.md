@@ -1,4 +1,4 @@
-# Phantom Pact 1.3.0: online co-op for Phantom Blade Zero
+# Phantom Pact 1.3.1: online co-op for Phantom Blade Zero
 
 Play the campaign with a friend: you see each other as a second Soul, fight the same enemies and bosses, and
 share loot, dust and bell rests. The host's world decides enemies, bosses and deaths; the guest's world follows.
@@ -13,8 +13,9 @@ https://github.com/yhsharaf/PhantomPact/issues, with what happened (host or gues
 
 1. **Phantom Blade Zero** on Steam.
 2. **UE4SS for Phantom Blade Zero** by Vercadi (Nexus Mods), installed in `PBZ\platform\steam`.
-3. **Python 3** from python.org, with "Add python to PATH" ticked during install.
-4. **Tailscale** (tailscale.com), both signed in to the same network.
+3. **Tailscale** (tailscale.com), both signed in to the same network.
+
+No Python install needed: the mod brings its own (Python's official portable build, in `PBZCoop\python`).
 
 ## Install (both players)
 
@@ -85,8 +86,8 @@ Not in PvP yet: executions (posture break only staggers).
 
 - **No "co-op on" line:** check `PhantomPact.ini` (Role, and HostAddress for the guest). The UE4SS log says what's
   missing.
-- **"Python 3 wasn't found":** install Python 3 from python.org with "Add python to PATH" ticked, then restart the
-  game.
+- **"Python wasn't found":** the `PBZCoop\python` folder is missing (some antivirus apps move it away).
+  Extract the zip again, or install Python 3 from python.org, which the mod then uses instead.
 - **`connected=no`:** both on Tailscale? The right IP in the guest's `HostAddress`? Windows Firewall must allow
   Python on private networks (Windows asks the first time the host plays; click Allow).
 - **No `[PBZCoop] Loaded` line at all:** UE4SS isn't installed in `PBZ\platform\steam`, or the mod folder isn't at

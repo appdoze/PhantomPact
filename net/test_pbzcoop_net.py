@@ -138,6 +138,24 @@ class FileReading(unittest.TestCase):
             self.assertTrue(text.startswith("P 1 0 0 0 0 0 0 Map"))
             self.assertIn("E Mob_", text)
 
+    def test_heartbeat_caught_mid_write_is_not_a_closed_game(self):
+        # The mod truncates the heartbeat file, then writes the time. Reading in between used to stop the relay
+        # while the game ran (seen in the two-copy test: the guest's relay quit 15 s after co-op came on).
+        relay = load_relay_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "net_alive.txt")
+            for text in ("", " \n"):
+                with open(path, "w") as f:
+                    f.write(text)
+                self.assertTrue(relay.game_alive(path, 30))
+            self.assertTrue(relay.game_alive(os.path.join(tmp, "missing.txt"), 30))
+            with open(path, "w") as f:
+                f.write(str(int(time.time())))
+            self.assertTrue(relay.game_alive(path, 30))
+            with open(path, "w") as f:
+                f.write(str(int(time.time()) - 60))
+            self.assertFalse(relay.game_alive(path, 30))
+
     def test_failed_writes_never_crash_and_lose_no_events(self):
         relay = load_relay_module()
         with tempfile.TemporaryDirectory() as tmp:
