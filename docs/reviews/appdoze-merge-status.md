@@ -77,10 +77,10 @@ branch `review/pr-5-now`).
 | Piece | Status |
 |---|---|
 | Live gates and doors | not reviewed (the related shared-world feature was skipped) |
-| Partner's moves played as montages (`moves.lua`) | not reviewed |
+| Partner's moves played as montages (`moves.lua`) | **Merged** with fixes: only montage folders (`/PBZCombatAsset/`, `/Game/`) are accepted, the loaded object must be an `AnimMontage`, new loads are capped (30/min), and the ghost isn't steered while a montage plays. PvP keeps ability replays (the PvP double-hit undo needs them). Checked in game: 3 guest swings sent, 3 played on the host's ghost |
 | Revive | not reviewed (we chose "each player's death stays their own"; needs a design decision) |
 | Shared dialogue | not reviewed |
-| Partner HUD and map marker (`hud.lua`) | not reviewed |
+| Partner HUD and map marker (`hud.lua`) | **Reworked into a compass** (`hud.lua`, `PartnerCompass = On`): their top line ("Partner 82% · 35 m") and the label over the ghost were too big, so we replaced them with a compass. A dry-brush silver line at the top, and a silver seal with 伴 that slides to where the partner is relative to your camera (dim at the ends when behind, red when down, hidden in another area). Art painted in Lumina in the game's ink style (`art/compass_line.png`, `art/partner_dot.png`). Their widget code needed an on-screen tip to copy (none exist), so it never showed |
 | Live kick-down stones | not reviewed |
 | Regroup on join | not reviewed (regroup itself is deferred) |
 

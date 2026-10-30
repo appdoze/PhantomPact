@@ -22,30 +22,45 @@ return function(api)
     local nextPoll = 0
     local tip
 
+    -- A new ink-bar text widget at viewport layer z, or nil. Made from the widget's class: copying an instance on
+    -- screen (as first written) found none until the game had shown a tip itself, so nothing ever appeared.
+    function status.newTipWidget(z)
+        local cls = FindObject("WidgetBlueprintGeneratedClass", "WB_TipsText_C")
+        if not valid(cls) then
+            cls = StaticFindObject(TIP_CLASS)
+        end
+        if not valid(cls) and type(LoadAsset) == "function" then
+            pcall(LoadAsset, TIP_CLASS)
+            cls = StaticFindObject(TIP_CLASS)
+        end
+        local pc = api.getPlayer1()
+        if not (valid(cls) and valid(pc)) then
+            return nil
+        end
+        local w = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(pc, cls, pc)
+        if not valid(w) then
+            return nil
+        end
+        w:AddToViewport(z)
+        w:SetVisibility(3)                          -- HitTestInvisible: seen, never clicked
+        return w
+    end
+
+    function status.onScreen(w)
+        return valid(w) and select(2, pcall(function() return w:IsInViewport() end)) == true
+    end
+
     local function show(text)
         log("Status: " .. text)
         if not status.on then
             return
         end
         pcall(function()
-            local onScreen = valid(tip) and select(2, pcall(function() return tip:IsInViewport() end)) == true
-            if not onScreen then
-                -- Made from the widget's class: copying an instance on screen (as first written) found none until
-                -- the game had shown a tip itself, so tips never appeared.
-                local cls = FindObject("WidgetBlueprintGeneratedClass", "WB_TipsText_C")
-                if not valid(cls) then
-                    cls = StaticFindObject(TIP_CLASS)
-                end
-                if not valid(cls) and type(LoadAsset) == "function" then
-                    pcall(LoadAsset, TIP_CLASS)
-                    cls = StaticFindObject(TIP_CLASS)
-                end
-                local pc = api.getPlayer1()
-                if not (valid(cls) and valid(pc)) then
+            if not status.onScreen(tip) then
+                tip = status.newTipWidget(400)
+                if not tip then
                     return
                 end
-                tip = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(pc, cls, pc)
-                tip:AddToViewport(400)
             end
             tip:SetVisibility(3)                    -- HitTestInvisible: seen, never clicked
             tip:SetText(FText("Phantom Pact: " .. text))

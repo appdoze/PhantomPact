@@ -75,6 +75,9 @@ return function(api)
         log("No PhantomPact.ini: co-op stays off (use the neton command to start it by hand).")
         return
     end
+    if api.hud then
+        api.hud.set((settings.partnercompass or "on"):lower() ~= "off")
+    end
     local role = (settings.role or "off"):lower()
     local modRole = ({ host = "host", guest = "client" })[role]
     if not modRole then

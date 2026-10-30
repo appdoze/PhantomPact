@@ -405,6 +405,13 @@ return function(api)
         return os.clock() - ghostMoveAt <= seconds
     end
 
+    -- The ghost started one of the partner's moves some other way (a montage, moves.lua): don't steer it while
+    -- the move's own motion plays, and count it for the hit attribution above.
+    function game.noteGhostMove()
+        ghostBusyUntil = os.clock() + GHOST_BUSY_S
+        ghostMoveAt = os.clock()
+    end
+
     -- Called every snapshot: any GA_* ability that just became active on the local player is sent as a move.
     function game.watchLocalPlayer(pawn, sendEvent)
         local asc = abilitySystem(pawn)
