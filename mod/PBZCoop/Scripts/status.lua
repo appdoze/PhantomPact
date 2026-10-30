@@ -1,24 +1,54 @@
 -- In-game connection status: the relay's net_status.txt turned into short tips at the bottom of the screen, in the
 -- game's own ink-bar tip widget (WB_TipsText, the one behind "This door doesn't open from this side").
+-- (From appdoze's PR #2; the tip is re-created after map travel, which removes it from the screen.)
 --
--- Shown when something changes: partner connected / lost, settings that differ between the two PCs (from the
--- relay's hello exchange), relay errors (Direct without a Secret, Steam unavailable), packets refused because the
--- Secrets differ, a lasting high ping, and an untested game build. Also keeps net.rttMs for the ghost's prediction.
+-- Shown when something changes: partner connected / lost, settings that differ between the two PCs (the relays'
+-- hello exchange), packets refused because the Secrets differ, a lasting high ping, and an untested game build.
+-- Also keeps net.rttMs for the ghost's prediction (coop.lua).
 
 return function(api)
     local log, valid, game = api.log, api.valid, api.game
     local coop = api.coop
     local net = coop.net
 
-    local POLL_TICKS = 60           -- 16 ms ticks between status reads (~1 s)
+    local POLL_S = 1.0              -- status reads
     local SHOW_S = 4.0              -- how long a tip stays
     local HIGH_PING_MS = 250        -- warn when the round trip stays above this...
     local HIGH_PING_FOR = 5         -- ...for this many reads in a row
     local REPEAT_S = 60             -- the same warning at most once a minute
+    local TIP_CLASS = "/Game/PBZContent/UI/InGame/SwitchUI/WB_TipsText.WB_TipsText_C"
 
-    local status = { on = true, last = {}, lastShown = {}, highPingReads = 0 }
-    local ticks = 0
+    local status = { on = true, last = {}, lastShown = {}, highPingReads = 0, buildShown = false }
+    local nextPoll = 0
     local tip
+
+    -- A new ink-bar text widget at viewport layer z, or nil. Made from the widget's class: copying an instance on
+    -- screen (as first written) found none until the game had shown a tip itself, so nothing ever appeared.
+    function status.newTipWidget(z)
+        local cls = FindObject("WidgetBlueprintGeneratedClass", "WB_TipsText_C")
+        if not valid(cls) then
+            cls = StaticFindObject(TIP_CLASS)
+        end
+        if not valid(cls) and type(LoadAsset) == "function" then
+            pcall(LoadAsset, TIP_CLASS)
+            cls = StaticFindObject(TIP_CLASS)
+        end
+        local pc = api.getPlayer1()
+        if not (valid(cls) and valid(pc)) then
+            return nil
+        end
+        local w = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(pc, cls, pc)
+        if not valid(w) then
+            return nil
+        end
+        w:AddToViewport(z)
+        w:SetVisibility(3)                          -- HitTestInvisible: seen, never clicked
+        return w
+    end
+
+    function status.onScreen(w)
+        return valid(w) and select(2, pcall(function() return w:IsInViewport() end)) == true
+    end
 
     local function show(text)
         log("Status: " .. text)
@@ -26,14 +56,11 @@ return function(api)
             return
         end
         pcall(function()
-            if not valid(tip) then
-                local sample = FindFirstOf("WB_TipsText_C")
-                local pc = FindFirstOf("PlayerController")
-                if not (valid(sample) and valid(pc)) then
+            if not status.onScreen(tip) then
+                tip = status.newTipWidget(400)
+                if not tip then
                     return
                 end
-                tip = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(pc, sample:GetClass(), pc)
-                tip:AddToViewport(400)
             end
             tip:SetVisibility(3)                    -- HitTestInvisible: seen, never clicked
             tip:SetText(FText("Phantom Pact: " .. text))
@@ -68,17 +95,13 @@ return function(api)
         local text = f:read("a") or ""
         f:close()
         local kv = {}
-        for k, v in text:gmatch("(%w+)=(%S+)") do
+        for k, v in text:gmatch("([%w_]+)=(%S+)") do
             kv[k] = v
         end
         return kv
     end
 
     local function poll()
-        if not net.enabled then
-            status.last = {}
-            return
-        end
         local s = readStatus()
         if s == nil then
             return
@@ -86,15 +109,9 @@ return function(api)
         local last = status.last
         net.rttMs = tonumber(s.rtt_ms)
 
-        if s.error == "direct-needs-secret" and last.error ~= s.error then
-            notify("error", "Direct needs the same Secret in PhantomPact.ini on both PCs.")
-        elseif s.error == "steam-init" and last.error ~= s.error then
-            notify("error", "Steam networking unavailable (is Steam running?).")
-        end
-
         if s.connected == "yes" and last.connected ~= "yes" then
-            notify("conn", "partner connected" .. (net.rttMs and string.format(" (ping %d ms)", net.rttMs) or "") ..
-                (s.auth == "aes-gcm" and ", encrypted" or (s.auth == "hmac" and ", signed" or "")))
+            notify("conn", "partner connected" .. (net.rttMs and string.format(" (ping %d ms)", net.rttMs) or "")
+                .. (s.auth == "on" and ", signed" or "") .. ".")
         elseif s.connected == "no" and last.connected == "yes" then
             notify("conn", "partner disconnected.")
         end
@@ -105,7 +122,7 @@ return function(api)
 
         local rejected = tonumber(s.rejected) or 0
         if rejected > (tonumber(last.rejected) or 0) and s.connected ~= "yes" then
-            notify("secret", "packets refused: check that both PCs use the same Secret.")
+            notify("secret", "packets refused: both PCs need the same Secret in PhantomPact.ini (or both none).")
         end
 
         if net.rttMs and net.rttMs > HIGH_PING_MS then
@@ -121,28 +138,32 @@ return function(api)
     end
 
     coop.extraTicks.status = function()
-        ticks = ticks + 1
-        if ticks % POLL_TICKS == 0 then
-            poll()
+        local now = os.clock()
+        if now < nextPoll then
+            return
         end
-        if ticks == POLL_TICKS and api.gameBuildWarning then
+        nextPoll = now + POLL_S
+        poll()
+        if api.gameBuildWarning and not status.buildShown then
+            status.buildShown = true
             notify("build", api.gameBuildWarning)
         end
     end
 
-    status.notify = notify          -- other modules' tips (sync, partner), same once-a-minute rule
+    status.notify = notify          -- other modules' tips (partner.lua)
 
+    -- tips on|off, tips <text> (show a test tip), tips (print the relay's status)
     function status.command(args)
         local a = (args or ""):lower()
         if a == "on" or a == "off" then
             status.on = a == "on"
             log("In-game status tips " .. a .. ".")
         elseif a ~= "" then
-            show(args)                              -- "status <text>": test the tip
+            show(args)
         else
             local s = readStatus() or {}
             log("Relay: connected=" .. tostring(s.connected) .. " rtt_ms=" .. tostring(s.rtt_ms) .. " auth="
-                .. tostring(s.auth) .. " mismatch=" .. tostring(s.mismatch))
+                .. tostring(s.auth) .. " mismatch=" .. tostring(s.mismatch) .. " rejected=" .. tostring(s.rejected))
         end
     end
 

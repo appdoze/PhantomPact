@@ -10,11 +10,6 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 RELAY = os.path.join(HERE, "pbzcoop_net.py")
 PORT = 47911
-PYTHON_RELAY = [sys.executable, "-I", RELAY]
-# The native relay (relay/, cargo build --release): the same tests run against it, and against a mix of both.
-NATIVE = os.environ.get("PBZ_RUST_RELAY") or os.path.join(HERE, "..", "relay", "target", "release",
-                                                          "pbzcoop_relay.exe" if os.name == "nt" else "pbzcoop_relay")
-HAVE_NATIVE = os.path.isfile(NATIVE)
 
 
 def write(path, text):
@@ -44,9 +39,6 @@ def event_lines(path):
 
 
 class RelayLoopback(unittest.TestCase):
-    HOST = PYTHON_RELAY      # command for the host / echo relay
-    CLIENT = PYTHON_RELAY    # command for the client relay
-
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.a = os.path.join(self.tmp.name, "a")
@@ -62,8 +54,8 @@ class RelayLoopback(unittest.TestCase):
         self.tmp.cleanup()
 
     def start(self, *args):
-        cmd = self.CLIENT if args[0] == "client" else self.HOST
-        p = subprocess.Popen([*cmd, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        p = subprocess.Popen([sys.executable, "-I", RELAY, *args], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
         self.procs.append(p)
         return p
 
@@ -146,6 +138,24 @@ class FileReading(unittest.TestCase):
             self.assertTrue(text.startswith("P 1 0 0 0 0 0 0 Map"))
             self.assertIn("E Mob_", text)
 
+    def test_heartbeat_caught_mid_write_is_not_a_closed_game(self):
+        # The mod truncates the heartbeat file, then writes the time. Reading in between used to stop the relay
+        # while the game ran (seen in the two-copy test: the guest's relay quit 15 s after co-op came on).
+        relay = load_relay_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "net_alive.txt")
+            for text in ("", " \n"):
+                with open(path, "w") as f:
+                    f.write(text)
+                self.assertTrue(relay.game_alive(path, 30))
+            self.assertTrue(relay.game_alive(os.path.join(tmp, "missing.txt"), 30))
+            with open(path, "w") as f:
+                f.write(str(int(time.time())))
+            self.assertTrue(relay.game_alive(path, 30))
+            with open(path, "w") as f:
+                f.write(str(int(time.time()) - 60))
+            self.assertFalse(relay.game_alive(path, 30))
+
     def test_failed_writes_never_crash_and_lose_no_events(self):
         relay = load_relay_module()
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,306 +215,272 @@ class RecordReplay(unittest.TestCase):
             self.assertIn("1 D sp:Boss 80.0 10.0", read(log))
 
 
-sys.path.insert(0, HERE)
-import pbzcoop_net  # noqa: E402  (unit tests of the relay's security helpers)
+class FakeSteamNet:
+    """Stands in for Steam's P2P network: messages addressed by SteamID64, delivered in memory."""
+
+    def __init__(self):
+        self.inbox = {}
+
+    def link(self, my_id, friends_in_game, peer=None):
+        self.inbox.setdefault(my_id, [])
+        return FakeSteamLink(self, my_id, friends_in_game, peer)
+
+
+class FakeSteamLink:
+    """The relay's link interface (as SteamLink): send/receive by SteamID64, friends hosting as candidates."""
+
+    def __init__(self, net, my_id, friends_in_game, peer):
+        self.net, self.my_id, self.friends, self.peer = net, my_id, friends_in_game, peer
+
+    def send(self, addr, data):
+        self.net.inbox.setdefault(addr, []).append((self.my_id, data))
+
+    def receive(self):
+        out, self.net.inbox[self.my_id] = self.net.inbox[self.my_id], []
+        return out
+
+    def wait(self, seconds):
+        time.sleep(min(seconds, 0.002))
+        return True
+
+    def candidates(self):
+        return list(self.friends)
+
+    def describe(self, addr):
+        return f"friend{addr}"
+
+    def describe_self(self):
+        return f"Steam as {self.my_id}"
+
+
+class SteamRelayLogic(unittest.TestCase):
+    """The relay over a Steam-style link (everything but Valve's network itself, which needs two accounts)."""
+
+    HOST, GUEST, OTHER = 76561190000000001, 76561190000000002, 76561190000000003
+
+    def run_relays(self, relays, seconds=1.5):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            for r in relays:
+                r.tick(time.monotonic())
+            time.sleep(0.01)
+
+    def folders(self, tmp, *names):
+        out = []
+        for n in names:
+            d = os.path.join(tmp, n)
+            os.makedirs(d)
+            out.append(d)
+        return out
+
+    def test_guest_finds_the_hosting_friend_and_both_directions_flow(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            hd, gd = self.folders(tmp, "host", "guest")
+            write(os.path.join(hd, "net_out.txt"), "P 1 10 20 30 0 0 850 850 M\nE sp:Boss 1 2 3 0 2900 2900 1 1120 BP_X_C\n")
+            write(os.path.join(hd, "net_events_out.txt"), "S h1\n1 B sp:Boss\n2 K sp:Thug\n")
+            write(os.path.join(gd, "net_out.txt"), "P 1 11 21 31 0 0 850 850 M\n")
+            write(os.path.join(gd, "net_events_out.txt"), "S g1\n1 D sp:Boss 80.0 10.0 L\n")
+            host = relay.Relay("host", hd, None, 0, net.link(self.HOST, [self.GUEST]))
+            # The guest has two friends in the game; only the host answers pings, so it pins the host.
+            guest = relay.Relay("client", gd, None, 0, net.link(self.GUEST, [self.OTHER, self.HOST]))
+            self.run_relays([host, guest])
+            self.assertEqual(guest.peer, self.HOST)
+            self.assertEqual(host.peer, self.GUEST)
+            self.assertIn("E sp:Boss", read(os.path.join(gd, "net_in.txt")))
+            self.assertIn("P 1 11 21 31", read(os.path.join(hd, "net_in.txt")))
+            self.assertEqual(event_lines(os.path.join(gd, "net_events_in.txt")), ["1 B sp:Boss", "2 K sp:Thug"])
+            self.assertEqual(event_lines(os.path.join(hd, "net_events_in.txt")), ["1 D sp:Boss 80.0 10.0 L"])
+
+    def test_two_guests_never_pin_each_other_and_the_host_keeps_its_first(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            hd, g1d, g2d = self.folders(tmp, "host", "g1", "g2")
+            for d in (hd, g1d, g2d):
+                write(os.path.join(d, "net_out.txt"), "P 1 0 0 0 0 0 850 850 M\n")
+            host = relay.Relay("host", hd, None, 0, net.link(self.HOST, [self.GUEST, self.OTHER]))
+            g1 = relay.Relay("client", g1d, None, 0, net.link(self.GUEST, [self.OTHER, self.HOST]))
+            self.run_relays([host, g1], 0.6)
+            g2 = relay.Relay("client", g2d, None, 0, net.link(self.OTHER, [self.GUEST, self.HOST]))
+            self.run_relays([host, g1, g2], 1.5)
+            self.assertEqual(g1.peer, self.HOST)
+            self.assertEqual(host.peer, self.GUEST)    # pinned to the first guest while it keeps talking
+            self.assertNotEqual(g2.peer, self.GUEST)   # a guest never answers another guest's pings
+            self.assertIsNone(g2.peer)                 # the busy host doesn't take a second guest
+
+    def test_guest_given_a_steamid_talks_only_to_it(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            hd, gd = self.folders(tmp, "host", "guest")
+            write(os.path.join(hd, "net_out.txt"), "P 7 1 2 3 0 0 850 850 M\n")
+            write(os.path.join(gd, "net_out.txt"), "P 1 0 0 0 0 0 850 850 M\n")
+            host = relay.Relay("host", hd, None, 0, net.link(self.HOST, []))
+            guest = relay.Relay("client", gd, None, 0, net.link(self.GUEST, [], peer=self.HOST))
+            self.run_relays([host, guest])
+            self.assertEqual(guest.peer, self.HOST)
+            self.assertIn("P 7 1 2 3", read(os.path.join(gd, "net_in.txt")))
 
 
 class Security(unittest.TestCase):
-    def test_signed_packets_open_and_tampering_or_replay_is_dropped(self):
-        a, b = pbzcoop_net.Auth("correct horse"), pbzcoop_net.Auth("correct horse")
-        p1 = a.seal({"t": "state", "s": "P 1"})
-        self.assertEqual(b.open(p1)["s"], "P 1")
-        self.assertIsNone(b.open(p1), "a replayed packet is dropped")
-        p2 = bytearray(a.seal({"t": "state", "s": "P 2"}))
-        p2[10] ^= 1
-        self.assertIsNone(b.open(bytes(p2)), "a modified packet is dropped")
-        self.assertIsNone(pbzcoop_net.Auth("other").open(a.seal({"t": "ping"})), "a wrong secret is dropped")
-        self.assertIsNone(b.open(pbzcoop_net.Auth("").seal({"t": "ping"})), "an unsigned packet is dropped")
-        self.assertEqual(b.rejected, 3)
+    """Optional Secret, sender filter and the crashes a single bad packet used to cause (review of PR #2)."""
 
-    def test_hmac_mode_also_drops_tampering_and_replay(self):
-        a, b = pbzcoop_net.Auth("k", encrypt=False), pbzcoop_net.Auth("k", encrypt=False)
-        self.assertEqual(a.mode, "hmac")
-        p = a.seal({"t": "ping"})
-        self.assertIsNotNone(b.open(p))
-        self.assertIsNone(b.open(p))
+    def test_signed_packets_open_and_bad_ones_are_refused(self):
+        relay = load_relay_module()
+        host, guest = relay.Auth("hunter2-but-longer", "host"), relay.Auth("hunter2-but-longer", "client")
+        p = host.seal(b'{"t":"state"}')
+        self.assertEqual(guest.open(p), b'{"t":"state"}')
+        self.assertIsNone(guest.open(p), "a replayed packet was accepted")
+        tampered = bytearray(host.seal(b'{"t":"state","s":"P 1"}'))
+        tampered[30] ^= 1
+        self.assertIsNone(guest.open(bytes(tampered)), "a tampered packet was accepted")
+        self.assertIsNone(host.open(host.seal(b"x")), "a packet bounced back at its sender was accepted")
+        other_host = relay.Auth("hunter2-but-longer", "host")
+        self.assertIsNone(host.open(other_host.seal(b"x")), "a packet from the same role was accepted")
+        self.assertIsNone(relay.Auth("other secret", "client").open(host.seal(b"x")), "wrong secret accepted")
+        self.assertIsNone(guest.open(b'{"t":"state"}'), "an unsigned packet was accepted with a secret set")
+        # Old enough to be outside the window: refused even though nothing from that session was seen.
+        stale = relay.Auth("hunter2-but-longer", "host")
+        real_time = relay.time.time
+        relay.time.time = lambda: real_time() - relay.Auth.REPLAY_WINDOW_S - 5
+        old = stale.seal(b"x")
+        relay.time.time = real_time
+        self.assertIsNone(guest.open(old), "a packet from minutes ago was accepted")
 
-    @unittest.skipUnless(os.name == "nt", "AES-GCM uses Windows CNG")
-    def test_aes_gcm_encrypts_and_rejects_plaintext_and_downgrade(self):
-        a, b = pbzcoop_net.Auth("k"), pbzcoop_net.Auth("k")
-        self.assertEqual(a.mode, "aes-gcm")
-        p = a.seal({"t": "state", "s": "P 1 secret-position"})
-        self.assertNotIn(b"secret-position", p, "the payload is encrypted")
-        self.assertEqual(b.open(p)["s"], "P 1 secret-position")
-        self.assertIsNone(b.open(p), "replay")
-        self.assertIsNone(b.open(pbzcoop_net.Auth("k", encrypt=False).seal({"t": "ping"})), "HMAC downgrade refused")
-        self.assertIsNone(b.open(b'{"t":"ping","v":2}'), "plain refused")
-        q = bytearray(a.seal({"t": "ping"}))
-        q[-1] ^= 1
-        self.assertIsNone(b.open(bytes(q)), "tag mismatch")
-        # Known-answer check of the CNG wrapper (NIST GCM test case 13: 256-bit zero key, zero nonce, empty input).
-        g = pbzcoop_net.AesGcm(bytes(32))
-        self.assertEqual(g.encrypt(bytes(12), b"", b"").hex(), "530f8afbc74536b9a963b4f1c4cb738b")
+    def test_partner_addresses_only_by_default(self):
+        relay = load_relay_module()
+        for ip in ("100.101.102.103", "192.168.1.20", "10.0.0.5", "172.20.1.1", "127.0.0.1", "25.1.2.3", "26.9.9.9"):
+            self.assertTrue(relay.address_allowed(ip, "partner"), ip)
+        for ip in ("8.8.8.8", "203.0.113.7", "not-an-ip"):
+            self.assertFalse(relay.address_allowed(ip, "partner"), ip)
+        self.assertTrue(relay.address_allowed("8.8.8.8", "any"))
 
-    def test_address_filter(self):
-        ts = pbzcoop_net.ALLOWED_NETWORKS["tailscale"]
-        self.assertTrue(pbzcoop_net.address_allowed(("100.101.102.103", 1), ts))
-        self.assertTrue(pbzcoop_net.address_allowed(("127.0.0.1", 1), ts))
-        self.assertFalse(pbzcoop_net.address_allowed(("192.168.1.20", 1), ts))
-        self.assertFalse(pbzcoop_net.address_allowed(("8.8.8.8", 1), ts))
-        self.assertTrue(pbzcoop_net.address_allowed(("8.8.8.8", 1), pbzcoop_net.ALLOWED_NETWORKS["any"]))
-
-    def test_secret_comes_from_the_ini(self):
+    def test_one_bad_packet_no_longer_kills_the_relay(self):
+        relay = load_relay_module()
+        self.assertEqual(relay.parse_events("S 1\n² K x\n" + "9" * 5000 + " K y\n1 K ok\n")[1], [(1, "1 K ok")])
+        net = FakeSteamNet()
         with tempfile.TemporaryDirectory() as tmp:
-            write(os.path.join(tmp, "PhantomPact.ini"), "Role = Host\nSecret = hunter2 ; shared\n")
-            self.assertEqual(pbzcoop_net.read_secret(tmp), "hunter2")
-            inst = os.path.join(tmp, "inst2")
-            os.makedirs(inst)
-            self.assertEqual(pbzcoop_net.read_secret(inst), "hunter2", "extra instances use the mod's ini")
-            write(os.path.join(tmp, "PhantomPact.ini"), "Secret = PUT-A-SHARED-SECRET-HERE\n")
-            self.assertEqual(pbzcoop_net.read_secret(tmp), "", "the placeholder means off")
+            r = relay.Relay("host", tmp, None, 0, net.link(1, []))
+            net.inbox[1].append((2, b'{"v":2,"t":"pong","ts":' + b"9" * 400 + b"}"))
+            net.inbox[1].append((2, b'{"v":2,"t":"pong","ts":true}'))
+            r.receive_all(time.monotonic())          # must not raise
+            self.assertIsNone(r.rtt_ms)
+
+    def test_settings_mismatch_is_reported_and_values_are_cleaned(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            hd, gd = os.path.join(tmp, "h"), os.path.join(tmp, "g")
+            os.makedirs(hd)
+            os.makedirs(gd)
+            host = relay.Relay("host", hd, None, 0, net.link(1, [2]),
+                               settings={"coopenemyhealth": "150", "pvp": "Off"}, version="1.3.0")
+            guest = relay.Relay("client", gd, None, 0, net.link(2, [1], peer=1),
+                                settings={"coopenemyhealth": "200", "pvp": "off"}, version="1.3.0")
+            for _ in range(30):
+                host.tick(time.monotonic())
+                guest.tick(time.monotonic())
+                time.sleep(0.01)
+            self.assertEqual(host.mismatch, ["coopenemyhealth"])
+            self.assertIn("mismatch=coopenemyhealth", host.status(time.monotonic()))
+            self.assertEqual(host.partner_version, "1.3.0")
+            # A partner's values can't inject keys or lines into net_status.txt.
+            net.inbox[1].append((2, json_bytes({"v": 2, "t": "hello", "ver": "1 time=999\nconnected=yes",
+                                                "cfg": {"pvp": "on connected=yes"}})))
+            host.receive_all(time.monotonic())
+            status = host.status(time.monotonic())
+            self.assertEqual(status.count("connected="), 1)
+            self.assertNotIn("\n", status)
+            self.assertNotIn("time=999", status)
+
+    def test_snapshot_goes_out_as_soon_as_the_mod_writes_it(self):
+        relay = load_relay_module()
+        net = FakeSteamNet()
+        with tempfile.TemporaryDirectory() as tmp:
+            r = relay.Relay("client", tmp, None, 0, net.link(2, [], peer=1))
+            r.wait(0.02)                             # takes the current files as already sent
+            net.inbox[1] = []
+            write(os.path.join(tmp, "net_out.txt"), "P 5 1 2 3 0 0 850 850 M\n")
+            r.wait(0.05)                             # no tick() in between: only the file watch can send it
+            sent = [d for _, d in net.inbox.get(1, []) if b"P 5 1 2 3" in d]
+            self.assertTrue(sent, "the new snapshot wasn't sent before the next tick")
 
 
-class SecureLoopback(RelayLoopback):
-    """Two relays with the same secret talk; a stranger's packets (wrong secret, or another source port to the
-    client) are counted and ignored."""
+def json_bytes(obj):
+    import json
+    return json.dumps(obj).encode()
 
-    def secret(self, folder, value):
-        write(os.path.join(folder, "PhantomPact.ini"), f"Secret = {value}\n")
 
-    def status(self, folder):
-        return dict(kv.split("=", 1) for kv in read(os.path.join(folder, "net_status.txt")).split() if "=" in kv)
+class SecretLoopback(RelayLoopback):
+    """Two real relay processes with a Secret in each player's PhantomPact.ini."""
 
-    def test_shared_secret_connects(self):
-        self.secret(self.a, "s3cret")
-        self.secret(self.b, "s3cret")
-        write(os.path.join(self.a, "net_out.txt"), "P 1 1 2 3 0 0 0\n")
-        write(os.path.join(self.b, "net_out.txt"), "P 2 4 5 6 0 0 0\n")
-        self.start("host", "--dir", self.a, "--port", str(PORT))
-        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
+    def start_pair(self, host_secret, guest_secret):
+        write(os.path.join(self.a, "PhantomPact.ini"), f"Role = Host\nSecret = {host_secret}\n")
+        write(os.path.join(self.b, "PhantomPact.ini"), f"Role = Guest\nSecret = {guest_secret}\n")
+        write(os.path.join(self.a, "net_out.txt"), "P 1 10.0 20.0 30.0 90.0 0 0\n")
+        write(os.path.join(self.b, "net_out.txt"), "P 7 -1.0 -2.0 -3.0 0.0 0 0\n")
+        self.start("host", "--dir", self.a, "--port", str(PORT + 3), "--ini", os.path.join(self.a, "PhantomPact.ini"))
+        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT + 3),
+                   "--ini", os.path.join(self.b, "PhantomPact.ini"))
+
+    def test_same_secret_connects(self):
+        self.start_pair("correct horse battery", "correct horse battery")
         self.assertTrue(wait_for(lambda: read(os.path.join(self.b, "net_in.txt")).startswith("P 1")))
-        self.assertTrue(wait_for(lambda: read(os.path.join(self.a, "net_in.txt")).startswith("P 2")))
-        want = "aes-gcm" if os.name == "nt" else "hmac"
-        self.assertTrue(wait_for(lambda: self.status(self.a).get("auth") == want), self.status(self.a))
+        self.assertTrue(wait_for(lambda: "auth=on" in read(os.path.join(self.a, "net_status.txt"))))
 
-    def test_wrong_secret_never_connects(self):
-        self.secret(self.a, "s3cret")
-        self.secret(self.b, "guess")
-        write(os.path.join(self.b, "net_out.txt"), "P 2 4 5 6 0 0 0\n")
-        self.start("host", "--dir", self.a, "--port", str(PORT))
-        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
-        self.assertTrue(wait_for(lambda: int(self.status(self.a).get("rejected", 0)) > 5))
-        self.assertEqual(read(os.path.join(self.a, "net_in.txt")), "")
-        self.assertEqual(self.status(self.a).get("connected"), "no")
-
-    def test_client_ignores_packets_not_from_its_host(self):
-        import socket
-        write(os.path.join(self.b, "net_out.txt"), "P 2 4 5 6 0 0 0\n")
-        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
-        self.assertTrue(wait_for(lambda: self.status(self.b).get("role") == "client"))
-        # Find the client's port from its first packet to a fake "host", then spoof from another port.
-        fake = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        fake.bind(("127.0.0.1", PORT))
-        fake.settimeout(3)
-        _, client_addr = fake.recvfrom(65535)
-        fake.close()
-        stranger = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        stranger.sendto(b'{"t":"state","s":"P 99 0 0 0 0 0 0","v":2}', client_addr)
-        stranger.close()
-        self.assertTrue(wait_for(lambda: int(self.status(self.b).get("filtered", 0)) >= 1))
+    def test_different_secrets_never_connect(self):
+        self.start_pair("correct horse battery", "something else")
+        self.assertTrue(wait_for(lambda: "rejected=" in read(os.path.join(self.a, "net_status.txt"))
+                                 and "rejected=0 " not in read(os.path.join(self.a, "net_status.txt"))))
         self.assertEqual(read(os.path.join(self.b, "net_in.txt")), "")
 
+    def test_allow_any_address_from_the_ini(self):
+        relay = load_relay_module()
+        seen, real = [], relay.Relay
+        relay.Relay = lambda *a, **k: (seen.append(k.get("allow")), real(*a, **k))[1]
+        for value, expected in (("On", "any"), ("Off", "partner")):
+            ini = os.path.join(self.a, "PhantomPact.ini")
+            write(ini, f"Role = Host\nAllowAnyAddress = {value}\n")
+            argv = sys.argv
+            sys.argv = ["pbzcoop_net.py", "host", "--dir", self.a, "--ini", ini, "--seconds", "0.2",
+                        "--port", "47920"]
+            try:
+                relay.main()
+            finally:
+                sys.argv = argv
+            self.assertEqual(seen[-1], expected, value)
 
-class Handshake(RelayLoopback):
-    def status(self, folder):
-        return dict(kv.split("=", 1) for kv in read(os.path.join(folder, "net_status.txt")).split() if "=" in kv)
-
-    def test_settings_that_differ_are_reported_on_both_sides(self):
-        write(os.path.join(self.a, "PhantomPact.ini"), "CoopEnemyHealth = 150\nPvP = On\nNetwork = Tailscale\n")
-        write(os.path.join(self.b, "PhantomPact.ini"), "CoopEnemyHealth = 100\nPvP = on\nNetwork = Tailscale\n")
-        self.start("host", "--dir", self.a, "--port", str(PORT))
-        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
-        self.assertTrue(wait_for(lambda: self.status(self.a).get("mismatch", "-") != "-", timeout=8))
-        self.assertEqual(self.status(self.a)["mismatch"], "coopenemyhealth=150/100", "PvP On/on is the same setting")
-        self.assertTrue(wait_for(lambda: self.status(self.b).get("mismatch") == "coopenemyhealth=100/150", timeout=8))
-
-    def test_same_settings_report_no_mismatch(self):
-        for d in (self.a, self.b):
-            write(os.path.join(d, "PhantomPact.ini"), "CoopEnemyHealth = 150\n")
-        self.start("host", "--dir", self.a, "--port", str(PORT))
-        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
-        self.assertTrue(wait_for(lambda: self.status(self.a).get("partner_version", "-") != "-", timeout=8))
-        self.assertEqual(self.status(self.a).get("mismatch"), "-")
-
-
-class Direct(unittest.TestCase):
-    """Direct (port forwarding): open to any address, so a secret is required; UPnP asks the router for the
-    forward. The router here is a fake on 127.0.0.1 that records the SOAP actions."""
-
-    RELAY_CMD = PYTHON_RELAY
-
-    def test_direct_refuses_to_start_without_a_secret(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p = subprocess.run([*self.RELAY_CMD, "host", "--dir", tmp, "--port", str(PORT), "--allow", "any",
-                                "--seconds", "1"], capture_output=True, text=True, timeout=20)
-            self.assertEqual(p.returncode, 2)
-            self.assertIn("error=direct-needs-secret", read(os.path.join(tmp, "net_status.txt")))
-
-    def test_ssdp_reply_location(self):
-        reply = b"HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLocation: http://192.168.1.1:5000/rootDesc.xml\r\n\r\n"
-        self.assertEqual(pbzcoop_net.ssdp_location(reply), "http://192.168.1.1:5000/rootDesc.xml")
-
-    def test_upnp_forward_is_added_and_removed(self):
-        import http.server
-        import threading
-        calls = []
-        desc = ('<?xml version="1.0"?><root xmlns="urn:schemas-upnp-org:device-1-0"><device><deviceList><device>'
-                '<deviceList><device><serviceList><service>'
-                '<serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>'
-                '<controlURL>/ctl/IPConn</controlURL></service></serviceList></device></deviceList>'
-                '</device></deviceList></device></root>')
-
-        class Router(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *a):
-                pass
-
-            def do_GET(self):
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(desc.encode())
-
-            def do_POST(self):
-                body = self.rfile.read(int(self.headers["Content-Length"])).decode()
-                calls.append((self.headers["SOAPAction"].strip('"').split("#")[1], body))
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"<s:Envelope><s:Body><NewExternalIPAddress>203.0.113.7</NewExternalIPAddress>"
-                                 b"</s:Body></s:Envelope>")
-
-        server = http.server.HTTPServer(("127.0.0.1", 0), Router)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                write(os.path.join(tmp, "PhantomPact.ini"), "Secret = s3cret\n")
-                url = f"http://127.0.0.1:{server.server_port}/rootDesc.xml"
-                p = subprocess.run([*self.RELAY_CMD, "host", "--dir", tmp, "--port", str(PORT),
-                                    "--allow", "any", "--upnp", "--upnp-location", url, "--seconds", "1.5"],
-                                   capture_output=True, text=True, timeout=30)
-                self.assertIn("upnp=ok external_ip=203.0.113.7", p.stdout)
-        finally:
-            server.shutdown()
-            server.server_close()
-        actions = [a for a, _ in calls]
-        self.assertEqual(actions[0], "AddPortMapping")
-        self.assertIn("GetExternalIPAddress", actions)
-        self.assertEqual(actions[-1], "DeletePortMapping", "the forward is removed when the relay stops")
-        add = calls[0][1]
-        for part in (f"<NewExternalPort>{PORT}</NewExternalPort>", "<NewProtocol>UDP</NewProtocol>",
-                     "<NewInternalClient>127.0.0.1</NewInternalClient>"):
-            self.assertIn(part, add)
-
-
-STEAM_DLL = os.environ.get("PBZ_STEAM_DLL", "")
-
-
-@unittest.skipUnless(STEAM_DLL, "set PBZ_STEAM_DLL to steam_api64.dll (Steam running) to test the Steam transport")
-class Steam(unittest.TestCase):
-    def test_steam_transport_starts_and_sends(self):
-        # Runs in a child process: SteamAPI_Init / Shutdown once per process.
-        code = ("import sys; sys.path.insert(0, %r); import pbzcoop_net as n; "
-                "t = n.SteamTransport(%r, 76561197960265728); print('me', t.my_id); "
-                "import time\n"
-                "for _ in range(10):\n"
-                "    t.send(b'hello', t.peer); t.poll(); time.sleep(0.05)\n"
-                "    if t.last_result == 1: break\n"
-                "print('send', t.last_result); t.close()") % (HERE, STEAM_DLL)
-        p = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
-        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        me = int(p.stdout.split("me ", 1)[1].split()[0])
-        self.assertTrue(str(me).startswith("7656119"), me)
-        self.assertIn("send 1", p.stdout, "k_EResultOK from SendMessageToUser")
-
-
-class Latency(RelayLoopback):
-    @unittest.skipIf(os.environ.get("GITHUB_ACTIONS"), "timing on shared CI runners is too noisy")
-    def test_new_snapshots_go_out_immediately(self):
-        a_out, b_in = os.path.join(self.a, "net_out.txt"), os.path.join(self.b, "net_in.txt")
-        write(a_out, "P 0 0 0 0 0 0 0\n")
-        self.start("host", "--dir", self.a, "--port", str(PORT))
-        self.start("client", "--dir", self.b, "--peer", "127.0.0.1", "--port", str(PORT))
-        self.assertTrue(wait_for(lambda: read(b_in).startswith("P 0")))
-        delays = []
-        for seq in range(1, 16):
-            line = f"P {seq} 0 0 0 0 0 0\n"
-            t0 = time.perf_counter()
-            write(a_out, line)
-            while read(b_in) != line and time.perf_counter() - t0 < 1.0:
-                time.sleep(0.001)
-            delays.append(time.perf_counter() - t0)
-            time.sleep(0.013)
-        delays.sort()
-        median = delays[len(delays) // 2]
-        print(f"\nfile-to-file median {median * 1000:.1f} ms, max {delays[-1] * 1000:.1f} ms")
-        # Before: up to one 50 ms relay tick on top of the network (median ~35-50 ms here). Now: one 5 ms file
-        # check (median ~15-25 ms with the test's own polling); the bound only catches a return to tick-paced sends.
-        self.assertLess(median, 0.035)
+    # The plain loopback tests don't apply to this class.
+    test_snapshot_and_events_both_ways = None
+    test_receiving_relay_restart_resends_events = None
+    test_echo_shifts_player_only_and_echoes_events = None
 
 
 @unittest.skipUnless(os.name == "nt", "the stand-in tool is a .cmd script")
 class CoopSyncAfterGame(unittest.TestCase):
-    def test_tool_runs_with_the_ledger_once_the_game_is_gone(self):
+    """Fork extra: pbzsave coop-sync run for each save slot's ledger once the game has closed."""
+
+    def test_each_slot_ledger_is_written_once_the_game_is_gone(self):
+        relay = load_relay_module()
         with tempfile.TemporaryDirectory() as tmp:
             tool = os.path.join(tmp, "fake_pbzsave.cmd")
             write(tool, "@echo args: %*\r\n")
-            write(os.path.join(tmp, "PhantomPact.ini"), f"CoopSyncTool = {tool}\n")
+            ini = {"coopsynctool": tool}
             log = os.path.join(tmp, "coop_sync.log")
-            pbzcoop_net.coop_sync_after_game(tmp, lambda: False, 5)
+            relay.coop_sync_after_game(tmp, ini, lambda: False, 5)
             self.assertFalse(os.path.exists(log), "nothing shared: nothing run")
-            write(os.path.join(tmp, "shared_world.txt"), "A PBZ_Xigu_WP-BP_Chest_C_1\n")
-            pbzcoop_net.coop_sync_after_game(tmp, lambda: True, 0.01)
+            write(os.path.join(tmp, "shared_world_NightmareRun0.txt"), "A PBZ_Xigu_WP-BP_Chest_C_1\n")
+            write(os.path.join(tmp, "shared_world_AutoSave0.txt"), "")
+            relay.coop_sync_after_game(tmp, ini, lambda: True, 0.01)
             self.assertIn("didn't exit", read(log))
             calls = []
-            pbzcoop_net.coop_sync_after_game(tmp, lambda: calls.append(1) or len(calls) < 2, 10)
-            self.assertIn("args: coop-sync", read(log))
-            self.assertIn("shared_world.txt", read(log))
-
-
-# ------------------------------------------------------------------------------- native relay (relay/, Rust)
-
-NATIVE_RELAY = [NATIVE]
-needs_native = unittest.skipUnless(HAVE_NATIVE, "build relay/ (cargo build --release) or set PBZ_RUST_RELAY")
-
-
-@needs_native
-class NativeLoopback(SecureLoopback):
-    """Native relay on both sides: every loopback, security and handshake test."""
-    HOST = CLIENT = NATIVE_RELAY
-
-
-@needs_native
-class NativeHostPythonClient(SecureLoopback):
-    """Mixed: a player on the native relay and one on the Python relay play together."""
-    HOST, CLIENT = NATIVE_RELAY, PYTHON_RELAY
-
-
-@needs_native
-class PythonHostNativeClient(SecureLoopback):
-    HOST, CLIENT = PYTHON_RELAY, NATIVE_RELAY
-
-
-@needs_native
-class NativeHandshake(Handshake):
-    HOST, CLIENT = NATIVE_RELAY, PYTHON_RELAY
-
-
-@needs_native
-class NativeDirect(Direct):
-    RELAY_CMD = NATIVE_RELAY
-
-
-@needs_native
-class NativeLatency(Latency):
-    HOST = CLIENT = NATIVE_RELAY
+            relay.coop_sync_after_game(tmp, ini, lambda: calls.append(1) or len(calls) < 2, 10)
+            text = read(log)
+            self.assertIn("args: coop-sync", text)
+            self.assertIn("shared_world_NightmareRun0.txt", text)
+            self.assertNotIn("shared_world_AutoSave0.txt", text, "empty ledgers are skipped")
 
 
 if __name__ == "__main__":

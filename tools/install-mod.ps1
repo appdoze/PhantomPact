@@ -43,9 +43,9 @@ New-Item -ItemType Directory -Force $target | Out-Null
 Copy-Item (Join-Path $source '*') $target -Recurse -Force
 # The relay lives in the mod folder; autostart.lua starts it from there (PhantomPact.ini, Role = Host/Guest).
 New-Item -ItemType Directory -Force (Join-Path $target 'relay') | Out-Null
-Copy-Item (Join-Path $PSScriptRoot '..\net\pbzcoop_net.py') (Join-Path $target 'relay') -Force
-# Development install: the test tools drive the mod with "eval" in cmd.txt, which only runs with dev.txt present.
-Set-Content -Path (Join-Path $target 'dev.txt') -Value 'Enables the eval command in cmd.txt (development only).'
+Copy-Item (Join-Path $PSScriptRoot '..\net\pbzcoop_net.py'), (Join-Path $PSScriptRoot '..\net\steam_transport.py') (Join-Path $target 'relay') -Force
+# This is the developer install (the tests send "eval" through cmd.txt): turn eval on. The release zip has no dev.txt.
+Set-Content (Join-Path $target 'dev.txt') 'eval enabled for development (tools\install-mod.ps1)' -Encoding ascii
 
 # This UE4SS build loads the mods listed in mods.txt; without an entry PBZCoop silently doesn't run.
 $modsTxt = Join-Path $modsDir 'mods.txt'

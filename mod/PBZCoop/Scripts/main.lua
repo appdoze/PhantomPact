@@ -6,7 +6,7 @@
 -- F8  spawn player 2: a second local player + a copy of player 1's character (F8-F11 need PBZCOOP_DEBUG=1)
 -- F9  remove player 2
 
-local VERSION = "1.9.0"
+local VERSION = "1.3.1"
 local TAG = "[PBZCoop] "
 if (os.getenv("PBZCOOP_INSTANCE") or "1") ~= "1" then
     TAG = "[PBZCoop#" .. os.getenv("PBZCOOP_INSTANCE") .. "] "
@@ -32,8 +32,14 @@ local function log(msg)
     print(TAG .. msg .. "\n")
 end
 
+-- Safe for anything: a stale reference handed back mid-respawn once had an IsValid that wasn't a function
+-- ("attempt to call a string value"), which broke that tick's whole snapshot read.
 local function valid(obj)
-    return obj ~= nil and obj:IsValid()
+    if obj == nil or type(obj) == "string" or type(obj) == "number" or type(obj) == "boolean" then
+        return false
+    end
+    local ok, result = pcall(function() return obj:IsValid() end)
+    return ok and result == true
 end
 
 local function gameplayStatics()
@@ -427,17 +433,17 @@ local api = {
     modDir = modDir,
     modRoot = modRoot,
     spawnBesidePlayer1 = spawnBesidePlayer1,
+    version = VERSION,
 }
 api.game = dofile(SCRIPT_DIR .. "pbz.lua")(api)
 local coop = dofile(SCRIPT_DIR .. "coop.lua")(api)
 api.coop = coop
-api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
-api.scaling = dofile(SCRIPT_DIR .. "scaling.lua")(api)
-api.sync = dofile(SCRIPT_DIR .. "sync.lua")(api)
 api.status = dofile(SCRIPT_DIR .. "status.lua")(api)
 api.partner = dofile(SCRIPT_DIR .. "partner.lua")(api)
 api.moves = dofile(SCRIPT_DIR .. "moves.lua")(api)
 api.hud = dofile(SCRIPT_DIR .. "hud.lua")(api)
+api.pvp = dofile(SCRIPT_DIR .. "pvp.lua")(api)
+api.scaling = dofile(SCRIPT_DIR .. "scaling.lua")(api)
 local net = coop.net
 
 -- Helpers for the "eval" command, so test snippets can reuse the mod's functions.
@@ -487,12 +493,12 @@ for name, fn in pairs(api.game.commands or {}) do
 end
 COMMANDS.pvp = api.pvp.command
 COMMANDS.scale = api.scaling.command
-COMMANDS.sync = api.sync.command
 COMMANDS.tips = api.status.command
 COMMANDS.partner = api.partner.command
-COMMANDS.regroup = function() api.partner.regroup() end
 COMMANDS.moves = api.moves.command
 COMMANDS.hud = api.hud.command
+-- Fork extras (appdoze/PhantomPact): everything else lives in fork.lua.
+pcall(function() dofile(SCRIPT_DIR .. "fork.lua")(api, COMMANDS) end)
 
 local function readCommandFile()
     local path = modDir() .. "cmd.txt"
@@ -517,10 +523,13 @@ local function runCommand(line)
     end
     log("> " .. line)
     if name == "eval" then
-        -- Running arbitrary Lua from cmd.txt is for development only: any program on the PC can write that file.
-        -- Enabled by PBZCOOP_DEBUG=1 or a dev.txt next to the mod (the dev tools create it).
+        -- Running any Lua from cmd.txt is for development only: any program on the PC can write that file.
+        -- Enabled by PBZCOOP_DEBUG=1 or a dev.txt next to the mod (tools\install-mod.ps1 creates it; the release
+        -- zip never has one). (From appdoze's PR #2.)
         local devFile = io.open(modRoot() .. "dev.txt", "r")
-        if devFile then devFile:close() end
+        if devFile then
+            devFile:close()
+        end
         if not (DEV_KEYS or devFile) then
             log("eval is off (development only): create dev.txt in the mod folder to enable it.")
             return

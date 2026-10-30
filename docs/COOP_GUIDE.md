@@ -62,9 +62,15 @@ the client logic runs on the echoed data, so host and client code both run in on
 | Same enemy on both PCs | Enemy id = `sp:<SpawnerID>` of the level AISpawner that made it (designer ids are stable; runtime actor names are not: the same placed character was `_2147476826` in one session and `_2147477757` in the next). Fallback: nearest same-class enemy within 20 m | Real tutorial boss spawned by its level spawner shows as `sp:ZuoShangyoung_Seq003` in snapshots, deaths and boss events. Fallback: a fake host reported a thug as `sp:FAKEID`; the client's local thug (another id) took the host's health/posture (150/60) and its hits went back as `D sp:FAKEID 80.0 60.0` |
 | Facing during moves | `M` events carry the attacker's yaw; the ghost turns to it before the move | Moves sent as `M <ability> 34.5` |
 | Hit reactions | Local `HitreactComponent` state changes are sent as `H <tag>`; the ghost's hit state is set to the same tag | Thug hits sent `CharacterState.Hitreact.State.Normal` / `.Heavy`; ghost state followed |
-| Bells (rest) | The game mode's `Refresh Monster` (bell rest and respawn) is hooked; it sends `R` and the other PC runs its own refresh, so regular enemies respawn for both; bosses follow the game's own rules (beaten ones stay dead) | Hook fired, `R` crossed, the other side refreshed and the spawner enemy came back |
+| Bells (rest) | The game mode's `Refresh Monster` (bell rest) is hooked; it sends `R` and the other PC runs its own refresh, so regular enemies respawn for both; bosses follow the game's own rules (beaten ones stay dead) | Hook fired, `R` crossed, the other side refreshed and the spawner enemy came back |
 | Currency | Dust gained locally (not by sync) is sent as `C <amount>` and added on the other PC: shared rewards. Spending isn't mirrored | +40 earned, `C 40` sent, the other side added 40, no echo loop |
 | Boss arena fog walls | On `B` the other PC closes `BP_FogDoor_C` within 60 m of its copy of the boss; on that boss's `K` it opens them | Fog wall rose at the tutorial boss arena entrance and opened on the boss's death |
+| Who kills an enemy | The client's copies of host enemies are held at `Health_Min` 1; a client hit reaching that floor goes as `D ... L` and the host kills; only `K` kills the copy | Client's killing blow: host thug 20 -> 0, client copy died on `K` (tools\pvp\coop-scenarios.ps1) |
+| Death respawns | The player's `Respawn Refresh Monster` step is hooked: a host death respawn sends `R death` (both refresh), a client's isn't sent (only its world refreshes; it re-kills what the host killed) | Client respawn left the host's half-health boss untouched; the host's later kill reached the client |
+| Spectating | 3 s into your death the camera follows the partner's ghost (death screen dimmed), back to you on respawn | View target switched to the ghost and back |
+
+Which PC decides each of these, and how duplicates (double hits, double pickups, echoed events) are prevented:
+[AUTHORITY.md](AUTHORITY.md).
 
 | Shared progress (`sync.lua`) | Quests, bells, enemy-group rewards, challenge points, codex entries, equipment, chests, rubbish piles, gates, doors and shortcuts (`Q L G N X J A` events). Chests, rubbish piles and fog gates change live; other gates, doors and shortcuts are written to `shared_world.txt` for `pbzsave coop-sync` (open from the next load) | sync.lua ran in game with a fake network: every scan (79 quests, 192 bells, 23 challenge points, 175 codex entries, 70 world objects, 150 equipment, 19-24 ms), no false events, every receive handler; not yet in a live co-op session |
 | Equipment (`J`) | New accessories, medicine, weapons, Phantom Edge weapons (backpack `Accessories` / `MedicineInfos` / `MainWeaponInfos` / `ShaqiWeaponInfos`) go to the partner through `PushAccessoryToInventory`, `PushMedicineToInventory`, `AddWeaponItem`; unknown ids are refused by the backpack and reported as failed | The three calls ran in game (owned ids: no duplicate; unknown id: nothing added) |
@@ -195,6 +201,12 @@ boss from its spawner and the bot engaged it as `sp:ZuoShangyoung_Seq003`, takin
 - World subsystems aren't found by `FindFirstOf`; use `SubsystemBlueprintLibrary:GetWorldSubsystem`.
   `PBZSpawnSubsystem` doesn't exist on the prologue map; enemies are spawned by class from the codex table.
 - `DataTable:FindRow` / `ForEachRow` work in this UE4SS; codex rows give each enemy's class and boss flag.
+- Killing an enemy type the save hasn't met yet (a new codex entry) autosaves the game. Tests only kill the thug
+  and the tutorial boss, which the test save already knows; `coop-scenarios.ps1` checks the save's hash. Removing
+  `W_PlayerDead` and a real death respawn (`Save Game on Respawn`) autosave too.
+- In the prologue, kills pay no dust and drop nothing, whatever the enemy (bandit, scavenger and GuiChai checked):
+  loot there comes from scripted encounters. The prologue also never starts a respawn: a real death shows no
+  death widget, and the player stays down.
 
 ## PvP (`pvp.lua`, `PvP = On`)
 

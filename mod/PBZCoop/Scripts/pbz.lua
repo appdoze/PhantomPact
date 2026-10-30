@@ -182,8 +182,19 @@ return function(api)
         bosses = {}
     end
 
+    -- Health_Min: the floor native damage can't push health below. The client holds its copies of the host's
+    -- enemies at 1 so only the host decides when one dies (coop.lua); 0 is the game's normal.
+    function game.setMinHealth(actor, value)
+        pcall(function()
+            local m = actor.AttributeSetBase.Health_Min
+            m.BaseValue = value
+            m.CurrentValue = value
+        end)
+    end
+
     function game.kill(actor)
         forgetBoss(actor)
+        game.setMinHealth(actor, 0)
         syncing = true
         local ok, err = pcall(function() actor:Kill(DIE_GAME_LOGIC) end)
         syncing = false
@@ -227,6 +238,36 @@ return function(api)
             pcall(function() actor:Kill(DIE_DAMAGED) end)
             syncing = false
         end
+    end
+
+    -- A native kill (death by damage) rolls the enemy's loot table (GetCombatLootDataForOwner, owner = the enemy,
+    -- at its "Level" attribute). Kill(), which the host uses for the client's killing blow, skips it, so that kill
+    -- would pay nothing: the host rolls the same table here. Returns dust and { itemId = count }.
+    -- (Prologue enemies are level 0, which pays nothing; "lootlevel <n>" overrides the level for testing.)
+    game.lootLevelOverride = nil
+    function game.rollLoot(actor)
+        local level = game.lootLevelOverride
+        if level == nil then
+            local ok, v = pcall(function() return actor.AttributeSetBase.Level.CurrentValue end)
+            level = (ok and type(v) == "number") and math.floor(v + 0.5) or 0
+        end
+        local data = {}
+        if not pcall(function() actor:GetCombatLootDataBySelf(level, data) end) then
+            return 0, {}, level
+        end
+        local dust = tonumber(data.LootDust) or 0
+        local items = {}
+        pcall(function()
+            data.LootItems:ForEach(function(k, v)
+                items[k:get():ToString()] = v:get()
+            end)
+        end)
+        return dust, items, level
+    end
+
+    game.commands.lootlevel = function(arg)
+        game.lootLevelOverride = tonumber(arg)
+        log("Loot level override: " .. tostring(game.lootLevelOverride) .. " (empty = the enemy's own level)")
     end
 
     function game.isBoss(actor)
@@ -351,6 +392,25 @@ return function(api)
     end
 
     local activeLocal = {}        -- ability class path -> true while active on the local player
+    local localMoveAt, ghostMoveAt = -1e9, -1e9   -- os.clock() when the local player / the ghost last started a move
+
+    -- Who caused an enemy's health drop: the local player's swing (a real hit to report) or the ghost's replay
+    -- of the other player's swing (that hit is the other PC's, already reported there: counting it here would
+    -- double it).
+    function game.localMoveRecent(seconds)
+        return os.clock() - localMoveAt <= seconds
+    end
+
+    function game.ghostMoveRecent(seconds)
+        return os.clock() - ghostMoveAt <= seconds
+    end
+
+    -- The ghost started one of the partner's moves some other way (a montage, moves.lua): don't steer it while
+    -- the move's own motion plays, and count it for the hit attribution above.
+    function game.noteGhostMove()
+        ghostBusyUntil = os.clock() + GHOST_BUSY_S
+        ghostMoveAt = os.clock()
+    end
 
     -- Called every snapshot: any GA_* ability that just became active on the local player is sent as a move.
     function game.watchLocalPlayer(pawn, sendEvent)
@@ -372,6 +432,7 @@ return function(api)
                     if not activeLocal[path] then
                         -- The facing at the start of the move, so the ghost swings where the player aimed.
                         sendEvent("M", path, string.format("%.1f", pawn:K2_GetActorRotation().Yaw))
+                        localMoveAt = os.clock()
                     end
                 end
             end
@@ -407,6 +468,7 @@ return function(api)
             ok, activated = pcall(function() return asc:TryActivateAbilityByClass(cls, true) end)
         end
         ghostBusyUntil = os.clock() + GHOST_BUSY_S
+        ghostMoveAt = os.clock()
         if not (ok and activated) then
             log("Ghost couldn't play " .. classPath:match("([^.]+)$"))
         end
@@ -461,6 +523,11 @@ return function(api)
             ghostHitComp = hitreactComponent(ghost)
         end
         if ghostHitComp then
+            -- Already reacting (on the host, enemies here hit the ghost too): one stagger, not the same one twice.
+            local okCur, cur = pcall(function() return ghostHitComp:GetCurrentHitState().TagName:ToString() end)
+            if okCur and cur ~= "None" then
+                return
+            end
             local ok, err = pcall(function() ghostHitComp:ChangeHitState({ TagName = FName(tag) }, nil, false) end)
             if not ok then
                 log("Ghost hit reaction failed: " .. tostring(err))
@@ -631,6 +698,14 @@ return function(api)
         end)
     end
 
+    -- The winner died (an enemy, a fall) while the victory screen showed: the death screen must not wear it.
+    function game.hideAliveScreen()
+        if valid(aliveScreen) and aliveHideAt then
+            aliveScreen:SetVisibility(1)
+            aliveHideAt = nil
+        end
+    end
+
     function game.showAliveScreen(seconds)
         if not valid(aliveScreen) then
             aliveScreen = makeAliveScreen()
@@ -729,18 +804,41 @@ return function(api)
     -- regular enemies (bosses the game considers beaten stay dead). When it runs on one PC, the other PC runs
     -- its own, so both worlds respawn together. The hook is registered once gameplay is up (the blueprint must
     -- be loaded first).
+    -- The player's respawn after death runs its own "Respawn Refresh Monster" step, which calls the game mode's
+    -- Refresh Monster: hooked too, so a death respawn can be told from a bell rest (onRest gets "death"/"bell").
     local REFRESH_FN = "/Game/PBZContent/Blueprint/BP_GameMode_Build.BP_GameMode_Build_C:Refresh Monster"
+    local RESPAWN_REFRESH_FN = "/Game/RenewalContent/Prototypes/Character/BP_RenewalPlayer.BP_RenewalPlayer_C:Respawn Refresh Monster"
+    local RESPAWN_WINDOW_S = 3.0
     local restHooked, refreshing = false, false
+    local respawnRefreshAt = nil
 
     function game.hookRest(onRest)
         if restHooked or not valid(StaticFindObject(REFRESH_FN)) then
             return restHooked
         end
+        if valid(StaticFindObject(RESPAWN_REFRESH_FN)) then
+            local okR, errR = pcall(function()
+                RegisterHook(RESPAWN_REFRESH_FN, function()
+                    respawnRefreshAt = os.clock()
+                end)
+            end)
+            if not okR then
+                log("Respawn hook failed (deaths will count as bell rests): " .. tostring(errR))
+            end
+        end
         local ok, err = pcall(function()
             RegisterHook(REFRESH_FN, function()
-                if not refreshing then
-                    onRest()
+                if refreshing then
+                    return
                 end
+                -- Blueprint hooks run after their function, so the respawn step's hook (the caller) only runs
+                -- once Refresh Monster (the callee) is done: decide a moment later, when both have reported.
+                local at = os.clock()
+                game.after(0.5, function()
+                    local death = respawnRefreshAt ~= nil and math.abs(respawnRefreshAt - at) <= RESPAWN_WINDOW_S
+                    respawnRefreshAt = nil
+                    onRest(death and "death" or "bell")
+                end)
             end)
         end)
         restHooked = ok
@@ -762,6 +860,102 @@ return function(api)
             log("Refresh Monster failed: " .. tostring(err))
         end
         return ok
+    end
+
+    -- respawnrefresh: test helper, run the respawn's own monster refresh step as if player 1 had died and respawned
+    -- (only that step: no save, no days lost, no teleport).
+    game.commands.respawnrefresh = function()
+        local _, pawn = api.getPlayer1()
+        local ok, err = pcall(function() pawn["Respawn Refresh Monster"](pawn) end)
+        log("Respawn Refresh Monster: " .. tostring(ok) .. " " .. tostring(err))
+    end
+
+    ------------------------------------------------------------------ spectating
+
+    -- While the local player is dead, the camera can follow the other player's ghost. The game's death screen is
+    -- dimmed, not removed or hidden (it drives the respawn: removing it runs Refresh Monster, and a hidden widget
+    -- may stop ticking), and comes back the moment we stop.
+    -- The view comes from a camera of our own placed behind and above the partner every frame, looking at them:
+    -- the ghost's own camera can't be used (it follows a controller the ghost doesn't have, so it sat in the
+    -- bamboo looking nowhere).
+    local spectating = nil        -- the actor the camera follows, or nil
+    local spectateCam = nil
+    local DEATH_SCREEN_DIM = 0.25
+    local CAM_BACK_CM, CAM_UP_CM, CAM_FOLLOW = 380, 170, 0.12   -- behind, above, fraction of the way per frame
+
+    local function deathScreen(pawn)
+        local ok, w = pcall(function() return pawn["Death Widget"] end)
+        return (ok and valid(w)) and w or nil
+    end
+
+    local function camSpot(target)
+        local l = target:K2_GetActorLocation()
+        local yaw = math.rad(target:K2_GetActorRotation().Yaw)
+        return { X = l.X - math.cos(yaw) * CAM_BACK_CM, Y = l.Y - math.sin(yaw) * CAM_BACK_CM, Z = l.Z + CAM_UP_CM }, l
+    end
+
+    local function aim(from, at)
+        local dx, dy, dz = at.X - from.X, at.Y - from.Y, (at.Z + 60) - from.Z
+        return { Pitch = math.deg(math.atan(dz, math.sqrt(dx * dx + dy * dy))), Yaw = math.deg(math.atan(dy, dx)), Roll = 0.0 }
+    end
+
+    local function followFrame()
+        if not (spectating and valid(spectating) and valid(spectateCam)) then
+            return
+        end
+        local want, at = camSpot(spectating)
+        local cur = spectateCam:K2_GetActorLocation()
+        local a = CAM_FOLLOW
+        local pos = { X = cur.X + (want.X - cur.X) * a, Y = cur.Y + (want.Y - cur.Y) * a, Z = cur.Z + (want.Z - cur.Z) * a }
+        spectateCam:K2_SetActorLocationAndRotation(pos, aim(pos, at), false, {}, true)
+        game.after(0.016, followFrame)
+    end
+
+    function game.spectate(target)
+        local pc, pawn = api.getPlayer1()
+        if not valid(pc) or not valid(pawn) then
+            return false
+        end
+        local follow = valid(target) and target or nil
+        if (follow and spectating and follow:GetAddress() == spectating:GetAddress()) or (not follow and not spectating) then
+            return true
+        end
+        local ok = true
+        if follow then
+            if not valid(spectateCam) then
+                local spot, at = camSpot(follow)
+                local gs = api.gs()
+                local t = { Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 }, Translation = spot, Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 } }
+                ok = pcall(function()
+                    local cam = gs:BeginDeferredActorSpawnFromClass(pc, StaticFindObject("/Script/Engine.CameraActor"), t,
+                        SPAWN_ADJUST_ALWAYS, nil, SCALE_MULTIPLY_WITH_ROOT)
+                    spectateCam = gs:FinishSpawningActor(cam, t, SCALE_MULTIPLY_WITH_ROOT)
+                    spectateCam:K2_SetActorLocationAndRotation(spot, aim(spot, at), false, {}, true)
+                end) and valid(spectateCam)
+            end
+            ok = ok and pcall(function() pc:SetViewTargetWithBlend(spectateCam, 1.0, 0, 0, false) end)
+        else
+            ok = pcall(function() pc:SetViewTargetWithBlend(pawn, 0.4, 0, 0, false) end)
+            if valid(spectateCam) then
+                local cam = spectateCam
+                game.after(0.5, function() if valid(cam) and cam ~= spectateCam then cam:K2_DestroyActor() end end)
+            end
+            spectateCam = nil
+        end
+        local w = deathScreen(pawn)
+        if w then
+            pcall(function() w:SetRenderOpacity(follow and ok and DEATH_SCREEN_DIM or 1.0) end)
+        end
+        local wasFollowing = spectating ~= nil
+        spectating = (ok and follow) or nil
+        if spectating and not wasFollowing then
+            game.after(0.016, followFrame)
+        end
+        return ok
+    end
+
+    function game.isSpectating()
+        return spectating ~= nil
     end
 
     -- rest: test helper, run the game's enemy refresh as if player 1 rested at a bell (the hook sees it).
@@ -813,6 +1007,7 @@ return function(api)
     ------------------------------------------------------------------ items
 
     local watched = {}            -- pickup name -> { itemId } for pickups near the local player last tick
+    local takenHere = {}          -- pickup name -> true once the local player took it (until the next bell rest)
 
     local function pickupItemId(p)
         local ok, id = pcall(function() return p.ItemId:ToString() end)
@@ -831,6 +1026,9 @@ return function(api)
         local all = FindAllOf("PBZPickupActor") or {}
         local map = game.mapName(pawn)
         if map ~= watchedMap or (#all == 0 and next(watched) ~= nil) then
+            if map ~= watchedMap then
+                takenHere = {}    -- pickup names are only unique within a map
+            end
             watchedMap = map
             watched = {}
         end
@@ -847,6 +1045,7 @@ return function(api)
         for name, info in pairs(watched) do
             local now = present[name]
             if now == nil or distance(now.loc, info.loc) > PICKUP_JUMP_CM then
+                takenHere[name] = true
                 report(name, info.itemId)
                 present[name] = nil
             end
@@ -861,6 +1060,11 @@ return function(api)
 
     -- The other player took this pickup: remove our copy and give us the same item, so loot is shared.
     function game.takeRemotePickup(name, itemId, pawn)
+        if takenHere[name] then
+            -- Both players grabbed it within the same moment: each already has theirs, as in single-player.
+            log("The other player took " .. name .. " too; you already have yours.")
+            return
+        end
         for _, p in ipairs(FindAllOf("PBZPickupActor") or {}) do
             if valid(p) and p:GetFName():ToString() == name then
                 watched[name] = nil
@@ -905,6 +1109,25 @@ return function(api)
     end
 
     -- Short name of the current map, so a ghost from another map isn't shown in this one.
+    -- In a cutscene: the game's own level-sequence manager. The manager is looked up again only every 2 s while
+    -- it isn't found (this runs with every snapshot). (From appdoze's PR #5.)
+    local seqManager, seqLookupAt = nil, -1e9
+    function game.inCutscene()
+        if not valid(seqManager) then
+            local now = os.clock()
+            if now - seqLookupAt < 2.0 then
+                return false
+            end
+            seqLookupAt = now
+            seqManager = FindFirstOf("PBZLevelSequenceManager")
+            if not valid(seqManager) then
+                return false
+            end
+        end
+        local ok, playing = pcall(function() return seqManager:IsInSequence() end)
+        return ok and playing == true
+    end
+
     function game.mapName(contextActor)
         local ok, name = pcall(function() return api.gs():GetCurrentLevelName(contextActor, true):ToString() end)
         return ok and name or "?"

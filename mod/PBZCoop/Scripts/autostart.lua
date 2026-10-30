@@ -1,6 +1,5 @@
--- Phantom Pact auto-start: reads PhantomPact.ini, starts the network relay (relay\pbzcoop_relay.exe, or
--- net/pbzcoop_net.py with the player's own Python) when the game starts, and turns online sync on once the player
--- is in gameplay.
+-- Phantom Pact auto-start: reads PhantomPact.ini, starts the network relay (net/pbzcoop_net.py, with the
+-- Python bundled in PBZCoop\python, else the player's own) when the game starts, and turns online sync on once the player is in gameplay.
 -- Players only edit the ini; nothing to run by hand.
 --
 -- The relay stops by itself when the game closes: this file rewrites net_alive.txt every few seconds and the
@@ -15,12 +14,12 @@ return function(api)
     local RELAY_FRESH_S = 5       -- a relay status this recent means a relay is already running
     local placeholder = "PUT-THE-HOSTS-TAILSCALE-IP-HERE"
 
-    -- Game builds this version was made and tested on, by PBZ.exe size (reading the size is instant; hashing a
-    -- 500 MB exe at startup isn't). Another build still runs, with a warning: function and field names may differ.
+    -- Game builds this version was tested on, by PBZ.exe size (instant to read; hashing a 500 MB exe isn't).
+    -- Another build still runs, with a warning: function and field names may have changed. (From appdoze's PR #2.)
     local KNOWN_BUILDS = {
         [511072344] = "Steam build 26266538",
     }
-    local function checkGameBuild()
+    pcall(function()
         local f = io.open(modRoot() .. "../../../PBZ.exe", "rb")
         if not f then
             return
@@ -28,14 +27,14 @@ return function(api)
         local size = f:seek("end")
         f:close()
         if KNOWN_BUILDS[size] then
-            log("Game build: " .. KNOWN_BUILDS[size] .. " (supported).")
+            log("Game build: " .. KNOWN_BUILDS[size] .. " (tested).")
         else
-            api.gameBuildWarning = "This game update isn't tested with this Phantom Pact version; some co-op features may fail."
-            log("WARNING: PBZ.exe (" .. tostring(size) .. " bytes) is a game build this Phantom Pact version wasn't "
-                .. "tested on. Co-op may partly fail; check for a Phantom Pact update.")
+            api.gameBuildWarning = "this game update isn't tested with this Phantom Pact version; some co-op "
+                .. "features may fail."
+            log("WARNING: this game build (PBZ.exe " .. tostring(size) .. " bytes) wasn't tested with Phantom Pact "
+                .. tostring(api.version) .. ". Co-op may partly fail; check for a Phantom Pact update.")
         end
-    end
-    pcall(checkGameBuild)
+    end)
 
     local function readText(path)
         local f = io.open(path, "r")
@@ -76,6 +75,9 @@ return function(api)
         log("No PhantomPact.ini: co-op stays off (use the neton command to start it by hand).")
         return
     end
+    if api.hud then
+        api.hud.set((settings.partnercompass or "on"):lower() ~= "off")
+    end
     local role = (settings.role or "off"):lower()
     local modRole = ({ host = "host", guest = "client" })[role]
     if not modRole then
@@ -83,34 +85,23 @@ return function(api)
         return
     end
     local port = tonumber(settings.port) or 47800
+    -- Connect = Steam (P2P through Steam, friends only) or Tailscale (UDP to the host's IP). Old inis have no
+    -- Connect line and keep working over Tailscale.
+    local steam = (settings.connect or "tailscale"):lower() == "steam"
     local hostAddress = settings.hostaddress or ""
-    -- Network: Tailscale (default), Direct (port forwarding, needs a Secret) or Steam (Steam's own networking).
-    local network = (settings.network or "tailscale"):lower()
-    if network ~= "tailscale" and network ~= "direct" and network ~= "steam" then
-        log("PhantomPact.ini: Network = " .. tostring(settings.network) .. " isn't Tailscale, Direct or Steam; using Tailscale.")
-        network = "tailscale"
+    if hostAddress == placeholder then
+        hostAddress = ""
     end
-    -- Empty or Auto: find the partner among Steam friends playing PBZ (their relay advertises the other role).
-    local partner = settings.partnersteamid or ""
-    if partner == "" or partner:lower() == "auto" then
-        partner = "auto"
-    end
-    if network == "steam" and partner ~= "auto" and not partner:match("^7656119%d+$") then
-        log("PhantomPact.ini: PartnerSteamID must be Auto or a SteamID64 (17 digits, 7656119...). Co-op is off.")
+    if steam then
+        -- Optional for Steam: the host's Steam name (or SteamID64); empty finds any friend hosting in the game.
+        -- Names go on the command line in quotes, so characters cmd.exe treats specially are refused.
+        if hostAddress:find('[%"%%&|<>^]') then
+            log("PhantomPact.ini: HostAddress has a character that can't be used (\" % & | < > ^). Leave it empty to join any friend who's hosting.")
+            return
+        end
+    elseif modRole == "client" and (hostAddress == "" or not hostAddress:match("^[%w%.%-:]+$")) then
+        log("PhantomPact.ini: Role = Guest but HostAddress isn't set. Put the host's Tailscale IP there (or use Connect = Steam) and restart the game.")
         return
-    end
-    if network ~= "steam" and modRole == "client"
-        and (hostAddress == "" or hostAddress == placeholder or not hostAddress:match("^[%w%.%-:]+$")) then
-        log("PhantomPact.ini: Role = Guest but HostAddress isn't set. Put the host's IP there and restart the game.")
-        return
-    end
-
-    if api.partner then
-        api.partner.bindKey(settings.regroupkey)
-        api.partner.joinRegroup = (settings.regrouponjoin or "on"):lower() ~= "off"
-    end
-    if api.hud then
-        api.hud.set((settings.partnerhud or "on"):lower() ~= "off", (settings.partnermarker or "on"):lower() ~= "off")
     end
 
     -- Heartbeat for the relay; written before the relay starts so it doesn't see a stale one.
@@ -126,66 +117,50 @@ return function(api)
         return t ~= nil and os.time() - t <= RELAY_FRESH_S
     end
 
-    local function exists(path)
-        local f = io.open(path, "rb")
-        if f then
-            f:close()
-        end
-        return f ~= nil
-    end
-
     local function startRelay()
-        -- Relay = Auto (default): the native relay (relay\pbzcoop_relay.exe, no Python needed) when it's installed,
-        -- else the Python one. Native / Python force one. Both speak the same protocol, so the two players may differ.
-        local choice = (settings.relay or "auto"):lower()
-        local native = modRoot() .. "relay/pbzcoop_relay.exe"
         local relay = modRoot() .. "relay/pbzcoop_net.py"
-        local useNative = choice ~= "python" and exists(native)
-        if choice == "native" and not useNative then
-            log("PhantomPact.ini: Relay = Native but " .. native .. " isn't installed; using the Python relay.")
-        end
-        if not useNative and not exists(relay) then
+        local f = io.open(relay, "r")
+        if not f then
             log("Relay not found at " .. relay .. ". Reinstall Phantom Pact.")
             return false
         end
-        local args = string.format('%s --dir "%s" --port %d --alive-file "%s"', modRole, modDir(), port, alivePath)
-        if network == "steam" then
-            -- The game's own steam_api64.dll sits next to PBZ.exe, three folders above ue4ss\Mods\PBZCoop.
-            args = args .. string.format(' --transport steam --partner %s --steam-dll "%s"', partner,
-                modRoot() .. "../../../steam_api64.dll")
-        else
-            if modRole == "client" then
-                args = args .. ' --peer ' .. hostAddress
-            end
-            if network == "direct" then
-                args = args .. ' --allow any'
-                if modRole == "host" and (settings.upnp or "on"):lower() ~= "off" then
-                    args = args .. ' --upnp'
-                end
-            end
+        f:close()
+        -- --ini: the relay reads the Secret (if any) and the settings both players should share from the ini
+        -- itself, so the secret never appears on a command line.
+        local args = string.format('-I "%s" %s --dir "%s" --port %d --alive-file "%s" --ini "%s" --mod-version %s',
+            relay, modRole, modDir(), port, alivePath, modDir() .. "PhantomPact.ini", api.version or "?")
+        if steam then
+            args = args .. ' --transport steam'
         end
-        local ok, kind
-        if useNative then
-            -- A Windows-subsystem program: no console window. "start" returns at once, so the game doesn't wait.
-            ok = os.execute(string.format('start "" "%s" %s', native, args))
-            kind = "native relay"
-        else
-            -- pyw/pythonw: Python without a console window. The py launcher comes with python.org installs; plain
-            -- pythonw covers the rest.
-            local py = string.format('-I "%s" %s', relay, args)
-            ok = os.execute(string.format('where pyw >nul 2>nul && (start "" pyw -3 %s) || (where pythonw >nul 2>nul && start "" pythonw %s)',
-                py, py))
-            kind = "Python relay"
-            if not ok then
-                log("Couldn't start the relay: Python 3 wasn't found. Install it from python.org (tick \"Add python to PATH\") and restart the game.")
-                return false
-            end
+        if modRole == "client" and hostAddress ~= "" then
+            args = args .. ' --peer "' .. hostAddress .. '"'
         end
+        -- pythonw: Python without a console window. The release zip carries Python's own embeddable build in
+        -- PBZCoop\python, so players install nothing; without it, the player's Python (the py launcher from
+        -- python.org installs, else pythonw on PATH). "start" returns at once, so the game doesn't wait.
+        local bundled = (modRoot() .. "python/pythonw.exe"):gsub("/", "\\")
+        local cmd
+        local f = io.open(bundled, "rb")
+        local which = f and "bundled Python" or "your Python"
+        if f then
+            f:close()
+            cmd = string.format('start "" "%s" %s', bundled, args)
+        else
+            cmd = string.format('where pyw >nul 2>nul && (start "" pyw -3 %s) || (where pythonw >nul 2>nul && start "" pythonw %s)',
+                args, args)
+        end
+        local ok = os.execute(cmd)
         if not ok then
-            log("Couldn't start the native relay (" .. native .. ").")
+            log("Couldn't start the relay: Python wasn't found. Reinstall Phantom Pact (the zip includes it) and restart the game.")
             return false
         end
-        log(kind .. " started as " .. role .. (modRole == "client" and (", joining " .. hostAddress) or "") .. " on UDP " .. port .. ".")
+        local joining = modRole ~= "client" and ""
+            or hostAddress ~= "" and (", joining " .. hostAddress)
+            or ", looking for a Steam friend who's hosting"
+        local secret = settings.secret or ""
+        local signed = secret ~= "" and not secret:upper():find("^PUT%-") and secret:lower() ~= "off"
+        log("Relay started as " .. role .. joining .. (steam and " over Steam" or (" on UDP " .. port))
+            .. (signed and ", packets signed (Secret set)" or "") .. " (" .. which .. ").")
         return true
     end
 
@@ -213,11 +188,6 @@ return function(api)
                 if api.scaling and (tonumber(settings.coopenemyhealth) or tonumber(settings.coopenemyposture)) then
                     api.scaling.command(string.format("%d %d", tonumber(settings.coopenemyhealth) or 150,
                         tonumber(settings.coopenemyposture) or 130))
-                end
-                if api.sync then
-                    api.sync.codex = (settings.sharecodex or "on"):lower() ~= "off"
-                    api.sync.catchUp = (settings.catchup or "off"):lower() == "on"
-                    api.sync.set((settings.shareprogress or "on"):lower() ~= "off")
                 end
                 if (settings.pvp or ""):lower() == "on" and api.pvp then
                     if tonumber(settings.pvpdamage) then

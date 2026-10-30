@@ -7,9 +7,11 @@
 --                                                       posture = "Shachi", which breaks into an execution)
 --   net_events_out.txt / net_events_in.txt   reliable events: "S <session>" then "<id> <type> <args...>"
 --       M <move>             the sender's player started an attack/dodge/special move
---       D <enemy> <hp> <posture>   client -> host: the client's player took this much health/posture off it
+--       D <enemy> <hp> <posture> [L]   client -> host: the client's player took this much health/posture off
+--                            it; L = a killing blow (the client's copy is held at 1 health, so the host kills it)
 --       B <boss>             the sender's game started a boss fight with this enemy
---       R                    the sender rested at a bell (or respawned): regular enemies respawn on both PCs
+--       R [bell|death]       the sender rested at a bell, or the host died and respawned: enemies respawn on both
+--                            PCs (a client's own death respawn isn't sent: only its world refreshes)
 --       C <amount>           the sender gained this much dust (currency): shared rewards
 --       H <hit state tag>    the sender's player started a hit reaction; their ghost plays the same one
 --       K <enemy>            host -> client: this enemy died
@@ -17,6 +19,7 @@
 --
 -- Roles: the host's world is the truth for enemies (positions, health, deaths); the client mirrors it and
 -- reports its own hits. Each side shows the other's player as a "ghost" Hun steered by movement input.
+-- Who decides what (and why) is written up in docs/AUTHORITY.md.
 -- "echo" (solo testing) runs as host and also treats its own echoed events as the friend's.
 
 return function(api)
@@ -24,7 +27,7 @@ return function(api)
     local modDir, spawnBesidePlayer1, game = api.modDir, api.spawnBesidePlayer1, api.game
 
     local GHOST_CLASS = "/Script/Engine.DefaultPawn"
-    local NET_SEND_MS = 33        -- snapshot writes (~30/s); the relay sends each one as soon as it appears
+    local NET_SEND_MS = 50        -- matches the relay's tick
     local TICK_MS = 16            -- one game-thread tick: steer the ghost; every NET_EVERY ticks exchange state
     local GHOST_SNAP_CM = 600     -- walking ghost further than this from its target teleports instead
     local GHOST_STOP_CM = 60      -- walking ghost closer than this stops and faces the remote player's direction
@@ -34,14 +37,17 @@ return function(api)
     local GHOST_ACCELERATION = 2000 -- cm/s², P1 uses 210 but the ghost must react to network updates quickly
     local GHOST_SMOOTHING = 0.35  -- sphere ghost: fraction of the remaining distance covered per tick
     -- Dead reckoning: the ghost aims where the partner should be now, not where the last snapshot said, by
-    -- extending their recent velocity. Capped, so a stop or turn costs at most a short overshoot.
+    -- extending their recent velocity. Capped, so a stop or turn costs at most a short overshoot. Velocity comes
+    -- from snapshot numbers (the sender writes one every SNAPSHOT_S), not arrival times, which jitter.
+    -- (From appdoze's PR #2.)
+    local SNAPSHOT_S = math.max(1, math.floor(NET_SEND_MS / TICK_MS + 0.5)) * TICK_MS / 1000
     local PREDICT_MAX_S = 0.25    -- never extrapolate further ahead than this
     local PREDICT_MAX_CM = 300    -- nor further than this
     local PREDICT_MIN_SPEED = 30  -- cm/s; slower counts as standing (no prediction)
     local PREDICT_MAX_SPEED = 2500 -- cm/s; faster between two snapshots is a teleport, not movement
     local PREDICT_BLEND = 0.5     -- weight of the newest velocity sample (smooths jitter)
     local ENEMY_RADIUS_CM = 6000  -- host shares enemies within this distance of its player
-    -- How a mirrored enemy follows the host's copy on the client (glide, or jump across a big gap).
+    -- How a mirrored enemy follows the host's copy on the client: glide, or jump across a big gap (fork extra).
     local smoothEnemy = dofile(api.modRoot() .. "Scripts/smoothing.lua")
     local ENEMY_MATCH_CM = 2000   -- client: a same-class enemy this close stands in for a host enemy with another id
     local PICKUP_EVERY = 10       -- snapshots between pickup scans (0.5 s)
@@ -71,7 +77,13 @@ return function(api)
         pendingBosses = {},       -- client: host id -> true for a boss fight announced before our copy was matched
         matchSticky = {},         -- client: host id -> address of the local actor matched to it by class/position
         foggedBosses = {},        -- boss id -> boss actor while we keep its arena's fog walls closed for the other player
-        stats = { sent = 0, received = 0, applied = 0 },
+        hostKilled = {},          -- client: host id -> true for each death the host announced since the last shared rest
+        hostBosses = {},          -- client: host id -> true while the host's fight with that boss goes on
+        heldAlive = {},           -- client: actor address -> actor held at Health_Min 1 (only the host kills it)
+        healTicks = {},           -- client: host id -> snapshots in a row the host's health was clearly above ours
+        hostSeen = {},            -- host, PvP: name -> { hp, posture } last tick, to undo the ghost's own hits
+        deadSince = nil,          -- os.clock() when the local player died (spectating starts a little later)
+        stats = { sent = 0, received = 0, applied = 0, undone = 0 },
     }
 
     -- "loop" (solo test with the echo relay) plays both parts at once: it shares its enemies like a host and
@@ -115,7 +127,7 @@ return function(api)
         if not os.rename(tmp, path) then
             os.remove(path)
             if not os.rename(tmp, path) then
-                os.remove(tmp)    -- the relay had the file open; the next snapshot comes ~33 ms later
+                os.remove(tmp)    -- the relay had the file open; the next snapshot comes 50 ms later
             end
         end
     end
@@ -131,7 +143,8 @@ return function(api)
     end
 
     -- Amounts the other side may ask for in one event. Far above anything the game produces (a boss drops tens
-    -- of thousands of Dust, a hit deals thousands), but a malformed or forged event can't hand out billions.
+    -- of thousands of dust, a hit deals thousands), but a malformed or forged event can't hand out billions.
+    -- (Idea and caps from appdoze's review of the relay, PR #2.)
     local MAX_EVENT_DUST = 1000000
     local MAX_EVENT_DAMAGE = 1000000
 
@@ -266,8 +279,9 @@ return function(api)
             net.zeroSince = nil
         end
         local dead = zero and (os.clock() - net.zeroSince) >= 1.0
-        -- In a cutscene the partner isn't really playing: their ghost would stand idle (or wander) in your world.
-        local hide = otherMap or dead or t.Cine
+        local gone = net.partnerGone == true     -- see watchPartner
+        -- In a cutscene the partner isn't really playing: their ghost would stand idle in your world.
+        local hide = otherMap or dead or gone or t.Cine == true
         if hide ~= net.ghostHidden then
             net.ghostHidden = hide
             pcall(function()
@@ -275,8 +289,8 @@ return function(api)
                 net.ghost:SetActorEnableCollision(net.ghostWalks and not hide)
             end)
             if hide then
-                log("Ghost hidden: the other player is " .. (dead and "down" or (t.Cine and "in a cutscene")
-                    or ("on map " .. tostring(t.Map))) .. ".")
+                log("Ghost hidden: the other player is " .. (gone and "gone" or dead and "down"
+                    or t.Cine and "in a cutscene" or ("on map " .. tostring(t.Map))) .. ".")
             else
                 log("Ghost visible again.")
             end
@@ -293,10 +307,11 @@ return function(api)
         local cur = net.ghost:K2_GetActorLocation()
         local t = net.target
         local v = net.vel
-        if v and net.targetAt and v.X * v.X + v.Y * v.Y >= PREDICT_MIN_SPEED * PREDICT_MIN_SPEED then
+        if v and net.lastRemoteAt and not net.ghostHidden and not net.partnerGone
+            and v.X * v.X + v.Y * v.Y >= PREDICT_MIN_SPEED * PREDICT_MIN_SPEED then
             -- How old the partner's position is: time since it arrived plus its trip here (half the round trip
-            -- the relay measures, kept in net.rttMs by the status reader).
-            local ahead = math.min(os.clock() - net.targetAt + (net.rttMs or 0) / 2000, PREDICT_MAX_S)
+            -- the relay measures, kept in net.rttMs by status.lua).
+            local ahead = math.min(os.clock() - net.lastRemoteAt + (net.rttMs or 0) / 2000, PREDICT_MAX_S)
             local px, py = v.X * ahead, v.Y * ahead
             local d = math.sqrt(px * px + py * py)
             if d > PREDICT_MAX_CM then
@@ -339,8 +354,10 @@ return function(api)
 
     ------------------------------------------------------------------ enemies
 
-    -- Enemies the host shares: loaded, alive or just died, within ENEMY_RADIUS_CM of its player.
-    local function localEnemies(origin)
+    -- Enemies within ENEMY_RADIUS_CM of the local player, or (second origin) of the other player: the host shares
+    -- the enemies around the client too, so a client fighting far from the host still fights the host's enemy
+    -- (otherwise it would be the client's own, and could die there while alive for the host).
+    local function localEnemies(origin, origin2)
         local out = {}
         if not game.listEnemies then
             return out
@@ -348,7 +365,8 @@ return function(api)
         for _, e in ipairs(game.listEnemies()) do
             if valid(e) and e ~= net.ghost then
                 local ok, loc = pcall(function() return e:K2_GetActorLocation() end)
-                if ok and loc.X ~= nil and distance(loc, origin) <= ENEMY_RADIUS_CM then
+                if ok and loc.X ~= nil and (distance(loc, origin) <= ENEMY_RADIUS_CM
+                    or (origin2 ~= nil and distance(loc, origin2) <= ENEMY_RADIUS_CM)) then
                     out[#out + 1] = { actor = e, loc = loc }
                 end
             end
@@ -370,6 +388,25 @@ return function(api)
         return actor:GetClass():GetFName():ToString()
     end
 
+    -- A health/posture drop right after the ghost replayed a move, while the local player started none, is the
+    -- ghost's hit. The ghost is the other player, whose hits arrive as reported damage ("D"); its own native hit
+    -- (it only has an Attack stat in PvP) would count the same swing twice.
+    local ATTRIBUTION_S = 1.5
+    local function ghostsHit()
+        return game.ghostMoveRecent and game.ghostMoveRecent(ATTRIBUTION_S)
+            and not game.localMoveRecent(ATTRIBUTION_S)
+    end
+
+    local function undoHit(actor, prevHp, prevPosture)
+        if prevHp and game.setHealth then
+            game.setHealth(actor, prevHp)
+        end
+        if prevPosture and game.setPosture then
+            game.setPosture(actor, prevPosture)
+        end
+        net.stats.undone = net.stats.undone + 1
+    end
+
     -- Host: announce deaths (reliably) and list the rest in the snapshot.
     local function enemySnapshotLines(origin)
         local lines = {}
@@ -377,12 +414,28 @@ return function(api)
         if game.refreshEnemyIds then
             game.refreshEnemyIds()
         end
-        for _, e in ipairs(localEnemies(origin)) do
+        local hostSeen = {}
+        local partner = nil
+        if net.target ~= nil and not net.ghostHidden then
+            partner = { X = net.target.X, Y = net.target.Y, Z = net.target.Z }
+        end
+        for _, e in ipairs(localEnemies(origin, partner)) do
             local name = enemyName(e.actor)
             enemyByName[name] = e.actor
             local hp, maxhp = nil, nil
             if game.getHealth then
                 hp, maxhp = game.getHealth(e.actor)
+            end
+            if net.pvp and hp and hp > 0 then
+                -- Only in PvP does the ghost carry a real Attack stat, so only then can it hurt enemies here.
+                local posture = game.getPosture and game.getPosture(e.actor)
+                local prev = net.hostSeen[name]
+                if prev and prev.addr == e.actor:GetAddress() and ghostsHit()
+                    and ((prev.hp and hp < prev.hp - 0.5) or (prev.posture and posture and posture < prev.posture - 0.5)) then
+                    undoHit(e.actor, prev.hp, prev.posture)
+                    hp, posture = prev.hp, prev.posture
+                end
+                hostSeen[name] = { hp = hp, posture = posture, addr = e.actor:GetAddress() }
             end
             local dead = game.isDead and game.isDead(e.actor)
             if dead then
@@ -405,13 +458,17 @@ return function(api)
                 end
             end
         end
+        net.hostSeen = hostSeen
         return lines
     end
 
     -- id is the HOST's id for this enemy (it may differ from our own when matched by class and position).
-    local function reportHit(id, enemy, hpDamage, postureDamage)
+    -- lethal: our copy is held at 1 health (only the host kills it), so a killing blow can't show its full damage
+    -- here; it's sent as lethal and the host kills the enemy.
+    local function reportHit(id, enemy, hpDamage, postureDamage, lethal)
         if net.enabled and isClient() and valid(enemy) then
-            sendEvent("D", id, string.format("%.1f", hpDamage), string.format("%.1f", postureDamage or 0))
+            sendEvent("D", id, string.format("%.1f", hpDamage), string.format("%.1f", postureDamage or 0),
+                lethal and "L" or "-")
             net.stats.hitsReported = (net.stats.hitsReported or 0) + 1
         end
     end
@@ -504,12 +561,28 @@ return function(api)
         end
     end
 
+    -- The host's health this many snapshots in a row clearly above ours is a heal (a boss phase that restores
+    -- health): taken over. Our copy dips below the host's for a round trip after each of our own hits, which
+    -- this must not mistake for a heal, so it waits a full second.
+    local HEAL_TICKS = 20
+    local HELD_HP = 1             -- the floor the client's copies of host enemies are held at
+
+    -- keep: address -> actor still held this tick (nil releases every held copy).
+    local function releaseHeld(keep)
+        for addr, actor in pairs(net.heldAlive) do
+            if not (keep and keep[addr]) and valid(actor) and game.setMinHealth then
+                game.setMinHealth(actor, 0)
+            end
+        end
+        net.heldAlive = keep or {}
+    end
+
     local function applyRemoteEnemies(origin)
         if game.refreshEnemyIds then
             game.refreshEnemyIds()
         end
         enemyByName = matchRemoteEnemies(localEnemies(origin))
-        local nextSeen = {}
+        local nextSeen, held = {}, {}
         for name, actor in pairs(enemyByName) do
             local addr = actor:GetAddress()
             if net.pendingDeaths[name] then
@@ -536,12 +609,25 @@ return function(api)
                     local dHp = prev.hp - hp
                     local dPosture = (prev.posture and posture) and (prev.posture - posture) or 0
                     if dHp > 0.5 or dPosture > 0.5 then
-                        reportHit(name, actor, math.max(0, dHp), math.max(0, dPosture))
+                        if ghostsHit() then
+                            -- The host's swing, replayed here: the host's own world already took it.
+                            undoHit(actor, prev.hp, prev.posture)
+                            hp, posture = prev.hp, prev.posture
+                        else
+                            local lethal = net.heldAlive[addr] ~= nil and dHp > 0.5 and hp <= HELD_HP + 0.01
+                            reportHit(name, actor, math.max(0, dHp), math.max(0, dPosture), lethal)
+                        end
                     end
                 end
                 local r = net.remoteEnemies[name]
                 if r then
-                    -- Glide back toward the host's position; jump only across a big gap (smoothing.lua).
+                    -- One of the host's enemies: it dies when the host says so ("K"), never on its own here, so a
+                    -- killing blow is never played twice and a copy that's a hit ahead doesn't die before the host's.
+                    if not net.heldAlive[addr] and game.setMinHealth then
+                        game.setMinHealth(actor, HELD_HP)
+                    end
+                    held[addr] = actor
+                    -- Glide back toward the host's position; jump only across a big gap (smoothing.lua, fork extra).
                     local x, y, z, snap = smoothEnemy(actor:K2_GetActorLocation(), r)
                     if snap then
                         actor:K2_SetActorLocationAndRotation({ X = x, Y = y, Z = z },
@@ -553,6 +639,18 @@ return function(api)
                         game.setHealth(actor, r.Hp)
                         hp = r.Hp
                     end
+                    if game.setHealth and r.Hp ~= nil and hp ~= nil and r.MaxHp
+                        and r.Hp > hp + math.max(1, r.MaxHp * 0.05) then
+                        net.healTicks[name] = (net.healTicks[name] or 0) + 1
+                        if net.healTicks[name] >= HEAL_TICKS then
+                            log(string.format("%s healed on the host (%.0f -> %.0f): following.", name, hp, r.Hp))
+                            game.setHealth(actor, r.Hp)
+                            hp = r.Hp
+                            net.healTicks[name] = nil
+                        end
+                    else
+                        net.healTicks[name] = nil
+                    end
                     if game.setPosture and r.Posture ~= nil and posture ~= nil and r.Posture < posture - 0.5 then
                         game.setPosture(actor, r.Posture)
                         posture = r.Posture
@@ -563,11 +661,15 @@ return function(api)
             end
         end
         seen = nextSeen
+        -- Copies the host stopped sharing (it went out of range, or they're no longer matched) die normally again.
+        releaseHeld(held)
     end
 
     handlers.K = function(name)
         local actor = enemyByName[name]
         if isClient() then
+            net.hostKilled[name] = true
+            net.hostBosses[name] = nil
             if valid(actor) then
                 if game.kill then
                     game.kill(actor)
@@ -588,18 +690,53 @@ return function(api)
         end
     end
 
-    handlers.D = function(rest)
-        local name, amount, posture = rest:match("^(%S+) (%S+)%s*(%S*)")
-        amount = num(amount)
-        posture = num(posture)
-        if posture ~= nil then
-            posture = math.max(0, math.min(posture, MAX_EVENT_DAMAGE))
+    -- Host: the client's hit killed this enemy. The game's own loot roll didn't run (see game.rollLoot), so it's
+    -- rolled here, once. Dust goes to the host like any kill's and reaches the client as shared dust ("C");
+    -- items go to the client, who made the kill (as single-player gives them to the killer).
+    local function payKillLoot(name, actor)
+        local dust, items, level = game.rollLoot(actor)
+        local _, pawn = getPlayer1()
+        local paid = {}
+        if dust > 0 and valid(pawn) and pcall(function() pawn:ChangeDustNumInternal(dust) end) then
+            paid[#paid + 1] = dust .. " dust"
         end
-        if isHost() and name and amount and amount >= 0 and amount <= MAX_EVENT_DAMAGE then
+        for itemId, count in pairs(items) do
+            for _ = 1, math.max(1, math.floor(count)) do
+                sendEvent("I", "loot:" .. name, itemId)
+            end
+            paid[#paid + 1] = itemId .. " x" .. count
+        end
+        if #paid > 0 then
+            log(string.format("Your partner's kill (%s, level %d): %s.", name, level, table.concat(paid, ", ")))
+        end
+    end
+
+    handlers.D = function(rest)
+        local name, amount, posture, lethal = rest:match("^(%S+) (%S+)%s*(%S*)%s*(%S*)")
+        -- Checked before anything else: a real number in range (the lethal flag below can't smuggle in more).
+        amount = num(amount)
+        if amount == nil or amount < 0 or amount > MAX_EVENT_DAMAGE then
+            return
+        end
+        posture = num(posture)
+        posture = posture and math.max(0, math.min(posture, MAX_EVENT_DAMAGE)) or 0
+        if lethal == "L" then
+            amount = math.huge      -- the client's killing blow (its copy can't show the full damage)
+        end
+        if isHost() and name then
             local actor = enemyByName[name]
             if valid(actor) and game.applyDamage then
-                game.applyDamage(actor, amount, posture or 0)
+                local wasAlive = not (game.isDead and game.isDead(actor))
+                game.applyDamage(actor, amount, posture)
+                if wasAlive and game.isDead and game.isDead(actor) and game.rollLoot then
+                    payKillLoot(name, actor)
+                end
                 net.stats.hitsApplied = (net.stats.hitsApplied or 0) + 1
+                if net.hostSeen[name] then
+                    -- A reported hit, not the ghost's: the PvP undo check must take this as the new baseline.
+                    net.hostSeen[name] = { hp = game.getHealth(actor), posture = game.getPosture and game.getPosture(actor),
+                        addr = actor:GetAddress() }
+                end
                 if seen[name] then
                     -- In "loop" mode the client half watches this same enemy: this drop isn't a new local hit.
                     seen[name] = { hp = game.getHealth(actor), posture = game.getPosture and game.getPosture(actor),
@@ -637,14 +774,57 @@ return function(api)
         net.deadSent = {}
         net.pendingDeaths = {}
         net.pendingBosses = {}
+        net.hostKilled = {}
+        net.hostBosses = {}
         if game.resetBosses then
             game.resetBosses()
         end
     end
 
-    handlers.R = function()
-        log("The other player rested at a bell: respawning enemies here too.")
+    -- A death respawn refreshes the dying player's own world (the game does that, as in single-player).
+    --   Host died: its world is everyone's truth, so the client's world refreshes too ("R death"): like the host
+    --     dying in Elden Ring co-op, the fight starts over for both.
+    --   Client died: only the client's world refreshed. The host's world, and its boss fight, go on untouched;
+    --     the client's copies of what the host already killed are killed again, and a boss fight the host is
+    --     still in is shown again (bar and fog walls).
+    local function onLocalRest(kind)
+        if kind == "death" and net.role == "client" then
+            log("You died and respawned: your world refreshed, the host's goes on. Enemies the host already killed stay dead.")
+            local again = 0
+            for name in pairs(net.hostKilled) do
+                net.pendingDeaths[name] = true
+                again = again + 1
+            end
+            for name in pairs(net.hostBosses) do
+                net.pendingBosses[name] = true
+            end
+            if game.resetBosses then
+                game.resetBosses()
+            end
+            seen = {}
+            releaseHeld(nil)
+            if again > 0 then
+                log(again .. " enemies the host killed will be removed again as they load.")
+            end
+            return
+        end
+        if kind == "death" then
+            log("You died as host: enemies respawn in both worlds (the host's world is the shared one).")
+        else
+            log("Rested at a bell (enemies respawned): telling the other player.")
+        end
         forgetDeaths()
+        sendEvent("R", kind)
+    end
+
+    handlers.R = function(kind)
+        if kind == "death" then
+            log("The host died and respawned: enemies respawn here too.")
+        else
+            log("The other player rested at a bell: respawning enemies here too.")
+        end
+        forgetDeaths()
+        seen = {}
         if game.refreshEnemies then
             game.refreshEnemies()
         end
@@ -662,6 +842,9 @@ return function(api)
 
     handlers.B = function(name)
         log("The other player started a boss fight with " .. name .. ".")
+        if net.role == "client" then
+            net.hostBosses[name] = true
+        end
         local actor = enemyByName[name]
         if valid(actor) then
             mirrorBossFight(name, actor)
@@ -712,18 +895,12 @@ return function(api)
         net.seq = net.seq + 1
         if net.seq % 20 == 1 or net.localMap == nil then
             net.localMap = game.mapName and game.mapName(pawn) or "?"
-            -- The outfit we wear, so the partner's ghost of us wears it too (older versions ignore the field).
-            net.localOutfit = "-"
-            pcall(function()
-                local c = pawn:GetComponentByClass(StaticFindObject("/Script/ProjectPBZ.PBZAppearanceComponent"))
-                net.localOutfit = c:GetEffectiveOutfit():ToString()
-            end)
         end
-        -- Last field: 1 while in a cutscene (older versions ignore it).
+        -- Field 10 is the outfit in appdoze's fork ("-": we don't send one); field 11 is 1 while we're in a
+        -- cutscene. Older versions ignore both.
         local cine = game.inCutscene and game.inCutscene() and 1 or 0
-        net.localCine = cine == 1
-        local lines = { string.format("P %d %.1f %.1f %.1f %.1f %.0f %.1f %.1f %s %s %d",
-            net.seq, loc.X, loc.Y, loc.Z, yaw, speed, hp or 0, maxhp or 0, net.localMap, net.localOutfit or "-", cine) }
+        local lines = { string.format("P %d %.1f %.1f %.1f %.1f %.0f %.1f %.1f %s - %d",
+            net.seq, loc.X, loc.Y, loc.Z, yaw, speed, hp or 0, maxhp or 0, net.localMap, cine) }
         if isHost() then
             for _, l in ipairs(enemySnapshotLines(loc)) do
                 lines[#lines + 1] = l
@@ -743,14 +920,14 @@ return function(api)
             game.watchCurrency(pawn, sendEvent)
         end
         if game.hookRest and not net.restHooked then
-            net.restHooked = game.hookRest(function()
-                log("Rested at a bell (enemies respawned): telling the other player.")
-                forgetDeaths()
-                sendEvent("R")
+            net.restHooked = game.hookRest(function(kind)
+                if net.enabled then
+                    onLocalRest(kind)
+                end
             end)
         end
-        -- Both worlds: nearby enemies take the partner's ghost as a target too (on the guest, the host's ghost), so
-        -- an enemy fighting the other player turns to them in this world as well.
+        -- Both worlds (fork extra): nearby enemies take the partner's ghost as a target too, so on the guest an enemy
+        -- fighting the host turns to the host's ghost.
         if game.ghostAggro and valid(net.ghost) and not net.ghostHidden and net.seq % AGGRO_EVERY == 0 then
             game.ghostAggro(net.ghost, net.pvp)
         end
@@ -765,33 +942,32 @@ return function(api)
         for line in text:gmatch("[^\r\n]+") do
             local kind = line:sub(1, 1)
             if kind == "P" then
-                local seq, x, y, z, yaw, speed, hp, maxhp, map, outfit, cine = line:match(
+                local seq, x, y, z, yaw, speed, hp, maxhp, map, _, cine = line:match(
                     "^P (%d+) (%S+) (%S+) (%S+) (%S+)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)%s*(%S*)")
                 seq = tonumber(seq)
                 if seq ~= nil and seq ~= net.lastRemoteSeq then
                     local t = { X = num(x), Y = num(y), Z = num(z), Yaw = num(yaw),
                         Speed = num(speed), Hp = num(hp), MaxHp = num(maxhp),
                         Map = (map ~= nil and map ~= "") and map or nil,
-                        Cine = cine == "1",
-                        Outfit = (outfit ~= nil and outfit:match("^Hun_OutFit_[%w_]+$")) and outfit or nil }
+                        Cine = cine == "1" }
                     -- A position that doesn't parse (or is NaN) is dropped, not applied.
                     if t.X and t.Y and t.Z and t.Yaw then
-                        local now, prev = os.clock(), net.target
-                        local dt = net.targetAt and (now - net.targetAt) or 0
-                        if prev ~= nil and dt > 0.005 and dt < 0.5 then
+                        local prev, steps = net.target, net.lastRemoteSeq and (seq - net.lastRemoteSeq) or 0
+                        if prev ~= nil and steps >= 1 and steps <= 20 then
+                            local dt = steps * SNAPSHOT_S
                             local vx, vy = (t.X - prev.X) / dt, (t.Y - prev.Y) / dt
                             if vx * vx + vy * vy <= PREDICT_MAX_SPEED * PREDICT_MAX_SPEED then
                                 local v, k = net.vel, PREDICT_BLEND
                                 net.vel = v and { X = v.X * (1 - k) + vx * k, Y = v.Y * (1 - k) + vy * k }
                                     or { X = vx, Y = vy }
                             else
-                                net.vel = nil
+                                net.vel = nil   -- a teleport: start over
                             end
-                        elseif dt >= 0.5 then
-                            net.vel = nil
+                        else
+                            net.vel = nil       -- first snapshot, or a gap (relay restart, loading)
                         end
-                        net.targetAt = now
                         net.lastRemoteSeq = seq
+                        net.lastRemoteAt = os.clock()
                         net.target = t
                     end
                 end
@@ -809,19 +985,12 @@ return function(api)
                 end
             end
         end
-        net.remoteEnemies = enemies
-        if net.target ~= nil and not valid(net.ghost) then
+        -- A partner who went silent leaves their last snapshot behind (a relay that died doesn't blank it): their
+        -- enemy lines are stale then, and aren't applied.
+        net.remoteEnemies = net.partnerGone and {} or enemies
+        -- (No ghost before we have a player ourselves: menus, loading screens.)
+        if net.target ~= nil and not valid(net.ghost) and valid(select(2, getPlayer1())) then
             spawnGhost()
-            net.ghostOutfit = nil
-        end
-        -- The partner's outfit, as a wardrobe preview (bIsPreview): shown on the ghost, never saved anywhere.
-        local outfit = net.target and net.target.Outfit
-        if outfit and valid(net.ghost) and net.ghostOutfit ~= outfit then
-            net.ghostOutfit = outfit
-            pcall(function()
-                local c = net.ghost:GetComponentByClass(StaticFindObject("/Script/ProjectPBZ.PBZAppearanceComponent"))
-                c:EquipOutfit(FName(outfit), true)
-            end)
         end
         updateGhostVisibility()
     end
@@ -832,12 +1001,17 @@ return function(api)
     local function clearRemoteState()
         net.remoteEnemies = {}
         net.target = nil
-        net.targetAt = nil
-        net.vel = nil
         net.lastRemoteSeq = nil
+        net.lastRemoteAt = nil
+        net.partnerGone = false
+        net.vel = nil
         net.matchSticky = {}
         net.pendingDeaths = {}
         net.pendingBosses = {}
+        net.hostKilled = {}
+        net.hostBosses = {}
+        net.healTicks = {}
+        net.hostSeen = {}
         enemyByName = {}
         seen = {}
     end
@@ -886,6 +1060,10 @@ return function(api)
 
     local function stop()
         net.enabled = false
+        if game.spectate then
+            game.spectate(nil)
+        end
+        releaseHeld(nil)
         destroyGhost()
         reopenFog()
         clearRemoteState()
@@ -899,10 +1077,14 @@ return function(api)
         for _ in pairs(net.remoteEnemies) do
             enemyCount = enemyCount + 1
         end
-        log(string.format("Mod: enabled=%s role=%s sent_seq=%d remote_seq=%s ghost=%s events_sent=%d events_in=%d remote_enemies=%d applied=%d hits_reported=%d hits_applied=%d",
+        local heldCount = 0
+        for _ in pairs(net.heldAlive) do
+            heldCount = heldCount + 1
+        end
+        log(string.format("Mod: enabled=%s role=%s sent_seq=%d remote_seq=%s ghost=%s events_sent=%d events_in=%d remote_enemies=%d applied=%d hits_reported=%d hits_applied=%d ghost_hits_undone=%d held=%d",
             tostring(net.enabled), net.role, net.seq, tostring(net.lastRemoteSeq), tostring(valid(net.ghost)),
             net.stats.sent, net.stats.received, enemyCount, net.stats.applied, net.stats.hitsReported or 0,
-            net.stats.hitsApplied or 0))
+            net.stats.hitsApplied or 0, net.stats.undone, heldCount))
         if valid(net.ghost) then
             local _, pawn = getPlayer1()
             local g = net.ghost:K2_GetActorLocation()
@@ -937,9 +1119,66 @@ return function(api)
         if t ~= nil and t.Map ~= nil and net.localMap ~= nil and t.Map ~= "?" and net.localMap ~= "?"
             and t.Map ~= net.localMap then
             seen = {}
+            releaseHeld(nil)
             return
         end
         applyRemoteEnemies(pawn:K2_GetActorLocation())
+    end
+
+    -- No new snapshot for a while: they quit, crashed or lost the connection. Their ghost mustn't stand there
+    -- frozen, and nothing may stay locked for a fight that's no longer happening (fog walls, held enemies).
+    local PARTNER_GONE_S = 12.0   -- longer than a loading screen (respawn teleport, streaming), which is silent too
+    local function watchPartner()
+        local gone = net.lastRemoteAt ~= nil and os.clock() - net.lastRemoteAt >= PARTNER_GONE_S
+        if gone and not net.partnerGone then
+            net.partnerGone = true
+            log("Lost the other player (nothing heard for " .. PARTNER_GONE_S .. " s): fog walls opened, enemies are yours again.")
+            reopenFog()
+            releaseHeld(nil)
+            net.remoteEnemies = {}
+            seen = {}
+            updateGhostVisibility()
+        elseif not gone and net.partnerGone then
+            net.partnerGone = false
+            log("The other player is back.")
+            updateGhostVisibility()
+        end
+    end
+
+    -- Spectating: a few seconds into our own death (the death screen's entrance plays first), the camera follows
+    -- the other player while they're up and on our map; it comes back to us when we respawn or they go down.
+    local SPECTATE_AFTER_S = 3.0
+    local function watchOwnDeath()
+        local _, pawn = getPlayer1()
+        if not valid(pawn) or not game.isDead then
+            return
+        end
+        if game.isDead(pawn) then
+            if net.deadSince == nil then
+                net.deadSince = os.clock()
+                if game.hideAliveScreen then
+                    game.hideAliveScreen()
+                end
+            end
+            if not game.spectate then
+                return
+            end
+            local partnerUp = valid(net.ghost) and not net.ghostHidden
+            if partnerUp and os.clock() - net.deadSince >= SPECTATE_AFTER_S and not game.isSpectating() then
+                if game.spectate(net.ghost) then
+                    log("You're down: watching the other player until you respawn.")
+                end
+            elseif not partnerUp and game.isSpectating() then
+                game.spectate(nil)
+                log("The other player is down or gone too: camera back on you.")
+            end
+        else
+            net.deadSince = nil
+            if game.isSpectating and game.isSpectating() then
+                game.spectate(nil)
+                log("Back on your feet: camera back on you.")
+            end
+        end
     end
 
     -- Other modules (pvp.lua) run here every tick while sync is on: name -> function.
@@ -950,15 +1189,15 @@ return function(api)
             return
         end
         ticks = ticks + 1
-        -- Our snapshot goes out every NET_EVERY ticks; what arrived from the other side is read every tick (two
-        -- small file reads), so a fresh update is used within one frame instead of up to NET_EVERY frames later.
         if ticks % NET_EVERY == 0 then
             runStage("writeSnapshot", writeSnapshot)
-        end
-        runStage("readSnapshot", readSnapshot)
-        runStage("processEvents", processEvents)
-        if isClient() and ticks % NET_EVERY == 0 then
-            runStage("applyRemoteEnemies", clientEnemies)
+            runStage("readSnapshot", readSnapshot)
+            runStage("processEvents", processEvents)
+            if isClient() then
+                runStage("applyRemoteEnemies", clientEnemies)
+            end
+            runStage("watchOwnDeath", watchOwnDeath)
+            runStage("watchPartner", watchPartner)
         end
         runStage("steerGhost", steerGhost)
         for name, fn in pairs(extraTicks) do

@@ -1,12 +1,12 @@
 # The native relay (Rust) instead of the Python relay
 
-Status: implemented in `relay/` (Phantom Pact 1.3.0). `relay\pbzcoop_relay.exe` is a drop-in for
-`net/pbzcoop_net.py`: same command line, same files in the mod folder, same wire protocol (JSON packets `v = 2`,
-hello/settings exchange, AES-256-GCM / HMAC framing, replay window, address filter, UPnP, Steam Networking Messages).
-A player on the native relay and a player on the Python relay play together. Players no longer need Python.
+Status: implemented in `relay/`, but **not compatible with upstream 1.3+** (its relay changed the protocol; see
+[FORK_EXTRAS.md](FORK_EXTRAS.md)). Not started by the mod; kept for its tests until it is ported.
 
-`PhantomPact.ini` `Relay = Auto` (default) starts the native relay when `relay\pbzcoop_relay.exe` is installed, else
-the Python one; `Native` / `Python` force one.
+It was a drop-in for the fork's earlier `net/pbzcoop_net.py` (before upstream 1.3): same command line, same files in
+the mod folder, same wire protocol (JSON packets `v = 2`, hello/settings exchange, AES-256-GCM / HMAC framing, replay
+window, address filter, UPnP, Steam Networking Messages), and played together with that Python relay. Upstream now
+bundles Python with the mod, so the original reason (no Python needed) is gone too.
 
 ## Why a separate program, not a DLL inside the game
 

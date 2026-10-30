@@ -83,26 +83,37 @@ fn http(method: &str, url: &str, headers: &[(&str, String)], body: &[u8]) -> Res
     s.write_all(req.as_bytes()).and_then(|_| s.write_all(body)).map_err(|e| e.to_string())?;
     let mut raw = vec![];
     let _ = s.read_to_end(&mut raw); // routers may reset after the body; whatever arrived is used
-    let text = String::from_utf8_lossy(&raw).into_owned();
-    let (head, mut body) = text.split_once("\r\n\r\n").map(|(h, b)| (h.to_string(), b.to_string())).ok_or("no HTTP reply")?;
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("no HTTP reply")?;
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let mut body = raw[split + 4..].to_vec();
     let status: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
     if !(200..300).contains(&status) {
         return Err(format!("HTTP {status}"));
     }
     if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
-        let mut out = String::new();
-        let mut rest = body.as_str();
-        while let Some((size, after)) = rest.split_once("\r\n") {
-            let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
-            if n == 0 || after.len() < n {
-                break;
-            }
-            out += &after[..n];
-            rest = after[n..].trim_start_matches("\r\n");
-        }
-        body = out;
+        body = dechunk(&body);
     }
-    Ok(body)
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Chunked transfer encoding, on bytes: a chunk boundary can fall inside a UTF-8 character (slicing a String there
+/// panicked), and a size larger than what arrived ends the body instead of reading past it.
+fn dechunk(mut rest: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    while let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") {
+        let size = std::str::from_utf8(&rest[..eol]).ok().map(|s| s.split(';').next().unwrap_or("").trim().to_string());
+        let Some(n) = size.and_then(|s| usize::from_str_radix(&s, 16).ok()) else { break };
+        let after = &rest[eol + 2..];
+        if n == 0 || after.len() < n {
+            break;
+        }
+        out.extend_from_slice(&after[..n]);
+        rest = &after[n..];
+        if rest.starts_with(b"\r\n") {
+            rest = &rest[2..];
+        }
+    }
+    out
 }
 
 fn tag<'a>(xml: &'a str, name: &str) -> Option<&'a str> {
@@ -205,5 +216,14 @@ mod tests {
         assert_eq!(join("http://192.168.1.1:5000/a/desc.xml", "ctl"), "http://192.168.1.1:5000/a/ctl");
         assert_eq!(join("http://x:1/", "http://y:2/c"), "http://y:2/c");
         assert_eq!(tag("<a><NewExternalIPAddress>203.0.113.7</NewExternalIPAddress>", "NewExternalIPAddress"), Some("203.0.113.7"));
+    }
+
+    #[test]
+    fn chunked_bodies_split_inside_a_character_or_cut_short_dont_panic() {
+        // "é" is two bytes; the first chunk ends between them.
+        let body = b"3\r\nab\xC3\r\n1\r\n\xA9\r\n0\r\n\r\n";
+        assert_eq!(String::from_utf8(dechunk(body)).unwrap(), "abé");
+        assert_eq!(dechunk(b"ff\r\nshort"), b"");
+        assert_eq!(dechunk(b"zz\r\nbad"), b"");
     }
 }

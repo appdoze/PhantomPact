@@ -142,17 +142,36 @@ return function(api)
         return SHARED[cls] and cls or nil
     end
 
-    -- Ledger of shared chests and rubbish piles for pbzsave coop-sync; read at start, so the partner's chests from
-    -- an earlier session are shown open again.
+    -- The save slot being played (the save system's continue slot; checked in game). Everything below is per slot:
+    -- the ledger file, the baseline, what's waiting to be applied.
+    local function currentSlot()
+        local ok, slot = pcall(function() return first("PBZSaveLoadSubsystem"):GetContinueSlotName():ToString() end)
+        if ok and type(slot) == "string" and slot:match("^[%w_%-]+$") then
+            return slot
+        end
+        return nil
+    end
+
+    -- Ledger of shared world objects for pbzsave coop-sync: shared_world_<slot>.txt, so a partner's chests only ever
+    -- reach the save they were shared in; coop-sync writes them and empties the file.
+    local function ledgerPath(slot)
+        return api.modDir() .. LEDGER:gsub("%.txt$", "_" .. slot .. ".txt")
+    end
+
     local function appendLedger(id)
-        local f = io.open(api.modDir() .. LEDGER, "a")
+        if not sync.slot then
+            return
+        end
+        local f = io.open(ledgerPath(sync.slot), "a")
         if f then
             f:write("A " .. id .. "\n")
             f:close()
         end
     end
-    do
-        local f = io.open(api.modDir() .. LEDGER, "r")
+
+    -- Read when a slot starts: the partner's objects from an earlier session in this save are shown again.
+    local function loadLedger(slot)
+        local f = io.open(ledgerPath(slot), "r")
         if f then
             for line in f:lines() do
                 local id = line:match("^A (%S+)")
@@ -164,6 +183,14 @@ return function(api)
             f:close()
         end
     end
+
+    -- Equipment that may be shared: the base game's items (equipment.txt); debug and DLC gear isn't granted.
+    local ALLOWED = {}
+    for _, line in ipairs(readList("equipment.txt", "^(%a+ [%w_%.%-]+)")) do
+        ALLOWED[line] = true
+    end
+    local MAX_GRANTS = 40           -- equipment and upgrades received per session, at most
+    sync.granted = 0
 
     -- Equipment stores of the backpack (owned item ids are the map keys) and how the backpack adds one.
     local EQUIP = {
@@ -390,6 +417,20 @@ return function(api)
         if not (sync.on and net.enabled) then
             sync.known = nil
             return
+        end
+        -- Another save loaded (or the first one): start over for it. Without this, loading a later save mid-session
+        -- would look like a pile of new progress and be sent to the partner.
+        local slot = currentSlot()
+        if not slot then
+            return
+        end
+        if slot ~= sync.slot then
+            sync.slot = slot
+            sync.known, sync.pending, sync.shown, sync.ledgered = nil, {}, {}, {}
+            sync.lifts, sync.pendingLifts = {}, {}
+            sync.askedCatchUp, sync.answeredCatchUp, sync.sentCycle = false, false, false
+            loadLedger(slot)
+            log("Shared progress: save slot " .. slot .. ".")
         end
         local now = scan()
         if sync.known == nil then
@@ -659,6 +700,10 @@ return function(api)
                 error("not owned here")
             end
             if lv > cur then
+                if sync.granted >= MAX_GRANTS then
+                    error("this session's limit of shared items is reached")
+                end
+                sync.granted = sync.granted + 1
                 LEVELS[store].raise(bp, id, lv)
                 local after = levelOf(bp, store, id) or cur
                 if sync.known then
@@ -690,8 +735,8 @@ return function(api)
 
     coop.handlers.J = function(rest)
         local store, id = (rest or ""):match("^(%a+) ([%w_%.%-]+)$")
-        if not (store and EQUIP[store] and #id < 128) then
-            return
+        if not (store and EQUIP[store] and ALLOWED[store .. " " .. id]) then
+            return                          -- not a base-game item: never granted
         end
         apply(EQUIP[store].what, "equip", store .. " " .. id, function()
             local bp = backpack()
@@ -699,6 +744,10 @@ return function(api)
                 error("no backpack")
             end
             if not owns(bp, store, id) then
+                if sync.granted >= MAX_GRANTS then
+                    error("this session's limit of shared items is reached")
+                end
+                sync.granted = sync.granted + 1
                 EQUIP[store].add(bp, id)
                 -- The backpack ignores ids it doesn't know (checked in game): only tell the player when it arrived.
                 if not owns(bp, store, id) then
@@ -713,8 +762,8 @@ return function(api)
 
     coop.handlers.A = function(id)
         local cn = validId(id) and actorClass(id)
-        if not cn then
-            return
+        if not (cn and sync.on and sync.slot) then
+            return                          -- sharing off, or no save loaded yet: nothing recorded
         end
         if not sync.pending[id] and not sync.ledgered[id] then
             sync.ledgered[id] = true

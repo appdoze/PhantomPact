@@ -9,7 +9,9 @@ use std::time::Duration;
 
 /// The whole file as text; a stray non-UTF-8 byte is replaced, a missing file is empty.
 pub fn read_text(path: &Path) -> String {
-    fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+    // Lua writes text files with CRLF on Windows; the Python relay reads them in text mode (LF), so do the same, or
+    // a "\r" travels on the wire to a Python partner.
+    fs::read(path).map(|b| String::from_utf8_lossy(&b).replace("\r\n", "\n")).unwrap_or_default()
 }
 
 /// read_text, minus a last line the mod is still writing (no newline yet): it is sent once it's complete.

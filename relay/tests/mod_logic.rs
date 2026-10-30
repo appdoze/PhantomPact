@@ -1,5 +1,5 @@
-//! Runs mod scripts outside the game against stand-ins for the game's objects: the parts whose logic doesn't need
-//! the game (which objects are shared, the ledger, regroup's teleport target, partner tips).
+//! Runs the fork's mod scripts outside the game against stand-ins for the game's objects: the parts whose logic
+//! doesn't need the game (what is shared and when, the per-save ledger, the limits, regroup's refusals, revive).
 
 use mlua::Lua;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ fn scratch(name: &str) -> PathBuf {
     d
 }
 
-/// A Lua state with the stand-in api (see STUBS) and `script` loaded as `M`.
+/// A Lua state with the stand-in api (see STUBS) and `script` loaded as `M` ("" = stubs only).
 fn load(script: &str, files: &Path) -> Lua {
     let lua = Lua::new();
     let lua_path = |p: &Path| p.to_string_lossy().replace('\\', "/") + "/";
@@ -23,7 +23,7 @@ fn load(script: &str, files: &Path) -> Lua {
     lua.globals().set("MOD_DIR", lua_path(files)).unwrap();
     lua.load(STUBS).exec().unwrap();
     if script.is_empty() {
-        return lua; // stubs only: the test loads what it needs
+        return lua;
     }
     let src = std::fs::read_to_string(mod_dir().join("Scripts").join(script)).unwrap();
     {
@@ -41,9 +41,12 @@ function FindFirstOf(cls) return objects[cls] end
 function FindAllOf(cls) return {} end
 function FName(s) return s end
 function ExecuteInGameThread(f) f() end
+function StaticFindObject(p) return { path = p, IsValid = function() return true end } end
 Key = { F5 = "F5", G = "G" }
 bound = {}
 function RegisterKeyBind(k, f) bound[k] = f end
+slot = "NightmareRun0"
+objects.PBZSaveLoadSubsystem = { GetContinueSlotName = function() return { ToString = function() return slot end } end }
 net = { enabled = true, localMap = "PBZ_Xigu_WP" }
 pawn = { K2_GetActorLocation = function() return { X = 0, Y = 0, Z = 0 } end }
 hp = { 100, 100 }
@@ -61,264 +64,244 @@ api = {
     getPlayer1 = function() return nil, pawn end,
     status = { notify = function(key, text) tips[#tips + 1] = key .. ": " .. text end },
 }
+-- A partner position that is fresh (upstream's coop.lua keeps net.lastRemoteAt).
+function partner(t) net.target = t net.lastRemoteAt = os.clock() net.partnerGone = false end
 "#;
 
+/// One sync scan (the first one only sets the slot and the baseline).
+const TICK: &str = "for _ = 1, 120 do api.coop.extraTicks.sync() end";
+
 #[test]
-fn shared_world_objects_go_to_the_ledger_once_and_gates_tell_the_player() {
-    let dir = scratch("sync");
+fn world_objects_go_to_this_saves_ledger_once_and_never_when_off() {
+    let dir = scratch("ledger");
     let lua = load("sync.lua", &dir);
-    lua.load(
+    lua.load(format!(
         r#"
+        objects.PBZLevelActorManager = {{ ActorSaveData = {{ ForEach = function() end }},
+            HasSaveDataByActorID = function() return false end, GetActorByID = function() return nil end }}
         local A = api.coop.handlers.A
+        A("PBZ_Xigu_WP-BP_Chest_C_1")                                  -- before any scan: no save known yet
+        {TICK}
         A("PBZ_Xigu_WP-BP_Block_Gate_C_UAID_60CF84809909035702_1081357494")
-        A("PBZ_Xigu_WP-BP_Block_Gate_C_UAID_60CF84809909035702_1081357494")   -- resent: once
-        A("PBZ_Xigu_WP-BP_KickStone_C_3")
-        A("PBZ_Xigu_WP-BP_Chest_C_UAID_60CF8480990963A302_1103301003")
-        A("PBZ_Xigu_WP-BP_SingleDoor_Poverty_C_UAID_1_2")                     -- stateful: not shared
-        A("PBZ_Xigu_WP-BP_Lift_C_UAID_1_2")                                    -- stateful: not shared
-        A("no level prefix")
-        A("PBZ_Xigu_WP-BP_Chest_C_1;os.exit()")                                -- not an id
-        "#,
-    )
+        A("PBZ_Xigu_WP-BP_Block_Gate_C_UAID_60CF84809909035702_1081357494") -- resent: once
+        A("PBZ_Xigu_WP-BP_NarrativeCage_C_0")
+        A("PBZ_Xigu_WP-BP_SingleDoor_Poverty_C_UAID_1_2")              -- stateful: not shared
+        A("PBZ_Xigu_WP-BP_Chest_C_1;os.exit()")                        -- not an id
+        M.set(false)
+        A("PBZ_Xigu_WP-BP_Chest_C_2")                                  -- sharing off: nothing recorded
+        "#
+    ))
     .exec()
     .unwrap();
-    // Lua's text mode writes CRLF on Windows; pbzsave and the mod read either.
-    let ledger = std::fs::read_to_string(dir.join("shared_world.txt")).unwrap().replace("\r\n", "\n");
-    assert_eq!(
-        ledger,
-        "A PBZ_Xigu_WP-BP_Block_Gate_C_UAID_60CF84809909035702_1081357494\nA PBZ_Xigu_WP-BP_KickStone_C_3\n\
-         A PBZ_Xigu_WP-BP_Chest_C_UAID_60CF8480990963A302_1103301003\n"
-    );
-    let tips: Vec<String> = lua.globals().get("tips").unwrap();
-    assert!(tips.is_empty(), "everything shared here opens live: {tips:?}");
+    let ledger = std::fs::read_to_string(dir.join("shared_world_NightmareRun0.txt")).unwrap().replace("\r\n", "\n");
+    assert_eq!(ledger, "A PBZ_Xigu_WP-BP_Block_Gate_C_UAID_60CF84809909035702_1081357494\nA PBZ_Xigu_WP-BP_NarrativeCage_C_0\n");
+    assert!(!dir.join("shared_world.txt").exists(), "no save-less ledger");
+}
 
-    // A new session reads the ledger back; once the gate's area is loaded it opens through its own function and
-    // leaves the list (the game records it); the chest is shown open and stays for pbzsave coop-sync.
-    let lua = load("sync.lua", &dir);
+#[test]
+fn loading_another_save_starts_over_instead_of_sending_it() {
+    let lua = load("sync.lua", &scratch("slots"));
+    let out: String = lua
+        .load(format!(
+            r#"
+            local bells = {{ "Bell_A" }}
+            objects.BellManager = {{ GetAllActivateBellIDs = function() return bells end }}
+            {TICK}                                   -- baseline for NightmareRun0
+            bells = {{ "Bell_A", "Bell_B" }}
+            {TICK}                                   -- a bell rung: sent
+            slot = "ManualSave1"
+            bells = {{ "Bell_A", "Bell_B", "Bell_C", "Bell_D" }}
+            {TICK}                                   -- another save: new baseline, nothing sent
+            {TICK}
+            local s = {{}} for _, e in ipairs(sent) do if not e:match("^CYC") then s[#s + 1] = e end end
+            return table.concat(s, ";")
+            "#
+        ))
+        .eval()
+        .unwrap();
+    assert_eq!(out, "L Bell_B");
+}
+
+#[test]
+fn equipment_only_base_game_items_up_to_the_session_limit() {
+    let lua = load("sync.lua", &scratch("equip"));
+    let out: String = lua
+        .load(format!(
+            r#"
+            {TICK}
+            local owned = {{}}
+            local function obj(t) t.IsValid = function() return true end return t end
+            local map = {{ ForEach = function(_, f) for id in pairs(owned) do
+                f({{ get = function() return {{ ToString = function() return id end }} end }}) end end }}
+            local bp = obj({{ Accessories = map,
+                PushAccessoryToInventory = function(_, id) owned[id] = true end }})
+            function FindAllOf(cls) if cls == "PBZBackPackSubsystem" then return {{ bp }} end return {{}} end
+            local J = api.coop.handlers.J
+            J("acc AC_Loot")                 -- base game: granted
+            J("acc AC_Loot")                 -- owned: nothing
+            J("acc AC_DebugGodRing")         -- not a base-game id: refused before anything is called
+            M.granted = 40
+            J("acc AC_ActHit")               -- over this session's limit
+            local ids = {{}} for id in pairs(owned) do ids[#ids + 1] = id end
+            table.sort(ids)
+            return table.concat(ids, ",") .. " | failed " .. M.failed
+            "#
+        ))
+        .eval()
+        .unwrap();
+    assert_eq!(out, "AC_Loot | failed 1");
+}
+
+#[test]
+fn upgrades_only_go_up_and_cycles_are_compared() {
+    let lua = load("sync.lua", &scratch("levels"));
     let out: String = lua
         .load(
             r#"
-            local opened = {}
-            local function actor(name) return {
-                IsValid = function() return true end, CurSwitchState = false, Finished = false,
-                K2_GetActorLocation = function() return { X = 0, Y = 0, Z = 0 } end,
-                OpenDoorNoAnim = function() opened[#opened + 1] = name end,
-                ["Change Switch State"] = function() opened[#opened + 1] = name end } end
-            objects.PBZLevelActorManager = {
-                ActorSaveData = { ForEach = function() end },
-                HasSaveDataByActorID = function(_, id) return false end,
-                GetActorByID = function(_, id) return actor(id) end,
-            }
-            function StaticFindObject(p) return { path = p } end
-            net.enabled = true
-            for _ = 1, 120 do api.coop.extraTicks.sync() end
-            local n = 0 for _ in pairs(M.pending) do n = n + 1 end
-            return #opened .. " opened, " .. n .. " pending: " .. table.concat(opened, ", ")
+            local calls = {}
+            local levels = { Tang = 30 }
+            local function obj(t) t.IsValid = function() return true end return t end
+            local map = { ForEach = function(_, f) for id, lv in pairs(levels) do
+                f({ get = function() return { ToString = function() return id end } end },
+                  { get = function() return { WeaponLevel = lv } end }) end end }
+            local bp = obj({ MainWeaponInfos = map,
+                UpgradeWeapon = function(_, id, normal, lv) calls[#calls + 1] = "UpgradeWeapon " .. id .. " " .. lv levels[id] = lv end })
+            function FindAllOf(cls) if cls == "PBZBackPackSubsystem" then return { bp } end return {} end
+            api.coop.handlers.O("weap Tang 45")
+            api.coop.handlers.O("weap Tang 40")
+            api.coop.handlers.O("weap Nope 50")
+            objects.PBZGameSystem = { GetCycleCount = function() return 1 end, GetDifficultModeByte = function() return 4 end }
+            api.coop.handlers.CYC("1 4")
+            api.coop.handlers.CYC("0 2")
+            return table.concat(calls, ", ") .. " | " .. table.concat(tips, " / ")
             "#,
         )
         .eval()
         .unwrap();
-    assert!(out.starts_with("2 opened, 2 pending"), "gate opened (recorded), chest shown, kick stone waits until you're 30-100 m away: {out}");
-    assert!(out.contains("Block_Gate") && out.contains("Chest"), "{out}");
+    assert!(out.starts_with("UpgradeWeapon Tang 45 | cycle: "), "{out}");
+    assert!(out.contains("cycle 0, difficulty 2; yours is cycle 1, difficulty 4"), "{out}");
 }
 
 #[test]
-fn partner_montages_play_on_the_ghost_and_replace_ability_replays() {
-    let lua = load("", &scratch("moves"));
+fn quest_steps_lifts_and_catch_up() {
+    let lua = load("sync.lua", &scratch("steps"));
+    let out: String = lua
+        .load(format!(
+            r#"
+            local log = {{}}
+            local function obj(t) t.IsValid = function() return true end return t end
+            local branch = obj({{ done = false, IsCompleted = function(self) return self.done end,
+                SucceedBranch = function(self) self.done = true log[#log + 1] = "SucceedBranch" end }})
+            local quest = obj({{ GetQuestCompletion = function() return 1 end, GetBranch = function() return branch end }})
+            objects.PBZNarrativeComponent = obj({{ GetQuest = function() return nil end,
+                BeginQuest = function() log[#log + 1] = "BeginQuest" return quest end,
+                GetInProgressQuests = function() return {{}} end, GetAllQuests = function() return {{}} end }})
+            api.coop.handlers.W("/Game/PBZstory/PBZQuest/Main/MainCh2.MainCh2_C MainCh2_PBZQuestBranch_4")
+            -- a lift in an area not loaded here waits; a loaded one moves once
+            local lift = obj({{ Positive = false, DoPositiveAction = function(self) self.Positive = true log[#log + 1] = "up" end,
+                DoNegativeAction = function(self) self.Positive = false log[#log + 1] = "down" end }})
+            local loaded = false
+            objects.PBZLevelActorManager = {{ ActorSaveData = {{ ForEach = function() end }},
+                GetActorByID = function() return loaded and lift or nil end }}
+            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_9_9 1")
+            local waiting = M.pendingLifts["PBZ_Fujizhilin_WP-BP_Lift_C_UAID_9_9"]
+            loaded = true
+            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_9_9 1")
+            -- catch-up: asked once at the start, answered once
+            M.catchUp = true
+            {TICK}
+            {TICK}
+            M.known.bells["Bell_NLES_001"] = true
+            api.coop.handlers.Z()
+            api.coop.handlers.Z()
+            return table.concat(log, ", ") .. " | waited " .. tostring(waiting) .. " | sent " .. table.concat(sent, ";")
+            "#
+        ))
+        .eval()
+        .unwrap();
+    // Steps and lifts applied; catch-up asked once ("Z") and answered once (the bell).
+    assert_eq!(out, "BeginQuest, SucceedBranch, up | waited true | sent Z;L Bell_NLES_001");
+}
+
+#[test]
+fn regroup_stays_in_the_area_and_refuses_when_it_should() {
+    let lua = load("regroup.lua", &scratch("regroup"));
     let out: String = lua
         .load(
             r#"
-            local played, abilities = {}, {}
-            api.coop.handlers.M = function(rest) abilities[#abilities + 1] = rest end
-            local moves = dofile(MOD_ROOT .. "Scripts/moves.lua")(api)
-            local function anim(rec) return { IsValid = function() return true end,
-                Montage_Play = function(_, m, rate, kind, start, stopAll) rec[#rec + 1] = m.path .. "@" .. string.format("%.2f", start) end } end
-            net.ghost = { IsValid = function() return true end, Mesh = { GetAnimInstance = function() return anim(played) end } }
-            net.rttMs = 100
-            function StaticFindObject(p) if p:find("Missing") then return nil end return { IsValid = function() return true end, path = p } end
-            local U, M = api.coop.handlers.U, api.coop.handlers.M
-            M("1 GA_Hun_Light_A 90")                                                -- before any montage: replayed
-            U("/PBZCombatAsset/Hun/AM_Hun_Tang_StanceEnter.AM_Hun_Tang_StanceEnter 0.20")
-            M("2 GA_Hun_Light_A 90")                                                -- now montages lead
-            U("/Missing/AM_X.AM_X 0")                                               -- not loadable here
-            U("bad path 1")
-            U("/Ok/AM_Y.AM_Y nan")
-            -- sender: our own montage changes, then restarts
-            local cur = { path = "/PBZCombatAsset/Hun/AM_Hun_Double_Exec.AM_Hun_Double_Exec", pos = 0.1 }
-            local mont = { IsValid = function() return true end, GetAddress = function() return cur.path end,
-                GetFullName = function() return "AnimMontage " .. cur.path end }
-            pawn.Mesh = { GetAnimInstance = function() return { IsValid = function() return true end,
-                GetCurrentActiveMontage = function() return mont end,
-                Montage_GetPosition = function() return cur.pos end } end }
-            net.enabled = true
-            local tick = api.coop.extraTicks.moves
-            tick() cur.pos = 0.5 tick() cur.pos = 0.0 tick()
-            return table.concat(played, " ") .. " | abilities " .. #abilities .. " | sent " .. table.concat(sent, " ; ")
-                .. " | failed " .. moves.failed
+            objects.PerformanceSystemSubsystem = { TeleportToTargetPoint = function(self, t, level)
+                teleports[#teleports + 1] = string.format("%s %.0f,%.0f,%.0f", level, t.Translation.X, t.Translation.Y, t.Translation.Z) end }
+            M.regroup()                                                     -- no partner yet
+            partner({ X = 1000, Y = 2000, Z = 300, Yaw = 90, Hp = 50, MaxHp = 100, Map = "PBZ_Duanhun_WP" })
+            M.regroup()                                                     -- other area: refused
+            partner({ X = 1000, Y = 2000, Z = 300, Yaw = 90, Hp = 50, MaxHp = 100, Map = "PBZ_Xigu_WP", Cine = true })
+            M.regroup()                                                     -- partner in a cutscene
+            partner({ X = 1000, Y = 2000, Z = 300, Yaw = 90, Hp = 50, MaxHp = 100, Map = "PBZ_Xigu_WP" })
+            net.pvp = true M.regroup() net.pvp = false                      -- PvP
+            hp[1] = 0 M.regroup() hp[1] = 100                               -- we're down
+            M.regroup()                                                     -- ok: onto the partner's own spot
+            M.regroup()                                                     -- cooldown
+            return table.concat(teleports, ",") .. " | " .. table.concat(tips, " / ")
             "#,
         )
         .eval()
         .unwrap();
-    assert!(out.starts_with("/PBZCombatAsset/Hun/AM_Hun_Tang_StanceEnter.AM_Hun_Tang_StanceEnter@0.25 | abilities 1"), "{out}");
-    assert!(out.contains("sent U /PBZCombatAsset/Hun/AM_Hun_Double_Exec.AM_Hun_Double_Exec 0.10 ; U /PBZCombatAsset/Hun/AM_Hun_Double_Exec.AM_Hun_Double_Exec 0.00"),
-        "sent on start and on restart, not while playing: {out}");
-    assert!(out.ends_with("failed 1"), "{out}");
+    assert!(out.starts_with("PBZ_Xigu_WP 1000,2000,300 | "), "{out}");
+    for why in ["no recent position", "another area", "cutscene", "PvP is on", "you're down", "wait a few seconds"] {
+        assert!(out.contains(why), "{why}: {out}");
+    }
 }
 
 #[test]
-fn revive_brings_the_downed_partner_back_and_dialogue_lines_become_tips() {
-    let lua = load("partner.lua", &scratch("revive"));
+fn revive_moves_the_revive_point_then_puts_it_back() {
+    let lua = load("regroup.lua", &scratch("revive"));
     let out: String = lua
         .load(
             r#"
             local after = {}
             api.game.after = function(s, f) after[#after + 1] = f end
-            objects.PerformanceSystemSubsystem = { TeleportToTargetPoint = function(self, t, level)
-                teleports[#teleports + 1] = level end }
-            local tick = api.coop.extraTicks.partner
-            local function check() for _ = 1, 30 do tick() end end
-            -- partner down: the regroup key sends a revive instead
-            net.target = { X = 0, Y = 0, Z = 0, Yaw = 0, Hp = 0, MaxHp = 100, Map = "PBZ_Xigu_WP" }
-            net.targetAt = os.clock()
-            M.regroup()
-            -- the other side: revive received while down -> the game's revive point moves to the reviver's side
-            -- and is put back once revived; revived next to the partner, so no teleport is needed
-            local revive = { Translation = { X = 1, Y = 2, Z = 3 }, Rotation = { X = 0, Y = 0, Z = 0, W = 1 } }
             local set = {}
             objects.PBZGameSystem = {
-                GetReviveTransform = function(_, t, cam) t.Translation = revive.Translation t.Rotation = revive.Rotation end,
-                SetReviveTransform = function(_, t) set[#set + 1] = string.format("%.0f,%.0f,%.0f", t.Translation.X, t.Translation.Y, t.Translation.Z) end,
-            }
-            net.localMap = "PBZ_Xigu_WP"
+                GetReviveTransform = function(_, t) t.Translation = { X = 1, Y = 2, Z = 3 } t.Rotation = { X = 0, Y = 0, Z = 0, W = 1 } end,
+                SetReviveTransform = function(_, t) set[#set + 1] = string.format("%.0f,%.0f,%.0f", t.Translation.X, t.Translation.Y, t.Translation.Z) end }
+            -- the partner is down: our key sends a revive with our position
+            partner({ X = 500, Y = 0, Z = 0, Yaw = 0, Hp = 0, MaxHp = 100, Map = "PBZ_Xigu_WP" })
+            M.regroup()
+            -- on the downed side: the revive arrives, we die and get back up next to the partner
+            partner({ X = 500, Y = 0, Z = 0, Yaw = 0, Hp = 100, MaxHp = 100, Map = "PBZ_Xigu_WP" })
             api.coop.handlers.Y("500 0 0 PBZ_Xigu_WP")
-            net.target = { X = 500, Y = 0, Z = 0, Yaw = 0, Hp = 100, MaxHp = 100, Map = "PBZ_Xigu_WP" }
-            hp[1] = 0 net.targetAt = os.clock() check() check()
-            hp[1] = 100 net.targetAt = os.clock() check()
-            for _, f in ipairs(after) do f() end
-            -- dialogue: a visible widget's line is sent once; a received line becomes a tip
-            local line = "Hun: The blade remembers."
-            function FindAllOf(cls) if cls == "PBZEventPipelineDialogWidget" then return { { IsValid = function() return true end,
-                IsVisible = function() return true end, DialogueData = { Text = { ToString = function() return line end } } } } end return {} end
-            check() check()
-            api.coop.handlers.T("Soul: Who goes there?")
-            return table.concat(sent, ";") .. " | teleports " .. table.concat(teleports, ",") .. " | revive point " .. table.concat(set, " then ") .. " | " .. table.concat(tips, " / ")
-            "#,
-        )
-        .eval()
-        .unwrap();
-    assert!(out.starts_with("Y 0 0 0 PBZ_Xigu_WP;T Hun: The blade remembers. | teleports  | revive point 500,0,50 then 1,2,3 |"), "{out}");
-    assert!(out.contains("revive sent"), "{out}");
-    assert!(out.contains("your partner is reviving you"), "{out}");
-    assert!(out.contains("revived: back at your partner's side"), "{out}");
-    assert!(out.contains("(partner's dialogue) Soul: Who goes there?"), "{out}");
-}
-
-#[test]
-fn regroup_teleports_behind_the_partner_into_their_area() {
-    let lua = load("partner.lua", &scratch("regroup"));
-    let out: String = lua
-        .load(
-            r#"
-            objects.PerformanceSystemSubsystem = { TeleportToTargetPoint = function(self, t, level)
-                teleports[#teleports + 1] = { t = t, level = level } end }
-            -- no partner yet
-            M.regroup()
-            net.target = { X = 1000, Y = 2000, Z = 300, Yaw = 90, Hp = 50, MaxHp = 100, Map = "PBZ_Duanhun_WP" }
-            net.targetAt = os.clock()
-            M.regroup()
-            M.regroup()                                       -- cooldown
-            local tp = teleports[1]
-            return string.format("%d %s %.1f %.1f %.1f %.3f %.3f | %s", #teleports, tp.level, tp.t.Translation.X,
-                tp.t.Translation.Y, tp.t.Translation.Z, tp.t.Rotation.Z, tp.t.Rotation.W, table.concat(tips, " / "))
-            "#,
-        )
-        .eval()
-        .unwrap();
-    assert!(out.starts_with("1 PBZ_Duanhun_WP 1000.0 1920.0 350.0 0.707 0.707 | "), "{out}");
-    assert!(out.contains("no position from your partner"), "{out}");
-    assert!(out.contains("loading their area"), "{out}");
-    assert!(out.contains("wait a few seconds"), "{out}");
-}
-
-#[test]
-fn partner_down_low_health_far_and_own_respawn_tips() {
-    let lua = load("partner.lua", &scratch("tips"));
-    let tips: Vec<String> = lua
-        .load(
-            r#"
-            M.bindKey("g")
-            local tick = api.coop.extraTicks.partner
+            api.coop.handlers.Y("500 0 0 PBZ_Duanhun_WP")                -- another area: ignored
+            local tick = api.coop.extraTicks.regroup
             local function check() for _ = 1, 30 do tick() end end
-            local function partner(hp, x)
-                net.target = { X = x or 0, Y = 0, Z = 0, Yaw = 0, Hp = hp, MaxHp = 100, Map = "PBZ_Xigu_WP" }
-                net.targetAt = os.clock()
-                check()
-            end
-            partner(100) partner(45) partner(40) partner(20)     -- 50% once, then 25%
-            partner(0)                                            -- one read at 0: not down yet
-            partner(0)                                            -- down
-            partner(100)                                          -- back
-            partner(100, 20000)                                   -- 200 m away
-            partner(100, 20500)                                   -- still far: no repeat
-            hp[1] = 0 check() check() hp[1] = 80 check()          -- you died and came back
-            return tips
+            hp[1] = 0 check() check()
+            hp[1] = 100 partner(net.target) check()
+            for _, f in ipairs(after) do f() end
+            return table.concat(sent, ";") .. " | revive point " .. table.concat(set, " then ") .. " | teleports " .. #teleports
             "#,
         )
         .eval()
         .unwrap();
-    let want = [
-        "partnerhp: your partner's health: 45%.",
-        "partnerhp: your partner's health: 20%.",
-        "partner: your partner is down.",
-        "partner: your partner is back.",
-        "far: your partner is 200 m away: G to regroup.",
-        "self: you're back: G regroups you with your partner.",
-    ];
-    assert_eq!(tips, want);
-    let bound: mlua::Table = lua.globals().get("bound").unwrap();
-    assert!(bound.contains_key("G").unwrap(), "RegroupKey bound");
+    assert_eq!(out, "Y 0 0 0 PBZ_Xigu_WP | revive point 500,0,50 then 1,2,3 | teleports 0");
 }
 
 #[test]
-fn guest_joining_far_away_is_taken_to_the_host_once() {
-    let lua = load("partner.lua", &scratch("join"));
+fn dialogue_lines_are_sent_once_and_shown_as_tips() {
+    let lua = load("dialogue.lua", &scratch("dialogue"));
     let out: String = lua
         .load(
             r#"
-            host = false
-            objects.PerformanceSystemSubsystem = { TeleportToTargetPoint = function(self, t, level)
-                teleports[#teleports + 1] = level end }
-            local tick = api.coop.extraTicks.partner
-            net.target = { X = 0, Y = 0, Z = 0, Yaw = 0, Hp = 100, MaxHp = 100, Map = "PBZ_Pangzhen_WP" }
-            for _ = 1, 3 do net.targetAt = os.clock() for _ = 1, 30 do tick() end end
-            return #teleports .. " " .. (teleports[1] or "-") .. " | " .. table.concat(tips, " / ")
+            local line = "Hun: The blade remembers."
+            function FindAllOf(cls) if cls == "PBZEventPipelineDialogWidget" then return { { IsVisible = function() return true end,
+                DialogueData = { Text = { ToString = function() return line end } } } } end return {} end
+            local tick = api.coop.extraTicks.dialogue
+            for _ = 1, 60 do tick() end
+            api.coop.handlers.T("Soul: Who goes there?")
+            return table.concat(sent, ";") .. " | " .. table.concat(tips, " / ")
             "#,
         )
         .eval()
         .unwrap();
-    assert!(out.starts_with("1 PBZ_Pangzhen_WP | "), "once, into the host's area: {out}");
-    assert!(out.contains("taking you to them"), "{out}");
-}
-
-#[test]
-fn partner_line_says_where_the_partner_is() {
-    let lua = load("hud.lua", &scratch("hud"));
-    let out: String = lua
-        .load(
-            r#"
-            local lines = {}
-            local function at(t) net.target = t net.targetAt = os.clock() lines[#lines + 1] = M.lineText() end
-            lines[#lines + 1] = M.lineText()
-            at({ X = 3500, Y = 0, Z = 0, Hp = 82, MaxHp = 100, Map = "PBZ_Xigu_WP" })
-            at({ X = 0, Y = 0, Z = 0, Hp = 0, MaxHp = 100, Map = "PBZ_Xigu_WP" })
-            at({ X = 0, Y = 0, Z = 0, Hp = 50, MaxHp = 100, Map = "PBZ_Xigu_WP", Cine = true })
-            at({ X = 0, Y = 0, Z = 0, Hp = 50, MaxHp = 100, Map = "PBZ_Duanhun_WP" })
-            return table.concat(lines, " | ")
-            "#,
-        )
-        .eval()
-        .unwrap();
-    assert_eq!(out, "Partner: connecting... | Partner 82% · 35 m | Partner: down | Partner 50% · in a cutscene | Partner 50% · in another area");
+    assert_eq!(out, "T Hun: The blade remembers. | dialogue: (partner's dialogue) Soul: Who goes there?");
 }
 
 #[test]
@@ -332,12 +315,8 @@ fn guest_enemies_glide_back_and_only_jump_across_big_gaps() {
             local res = {}
             local function show(cur, tgt) local x, _, _, snap = smooth(cur, tgt)
                 res[#res + 1] = x == nil and "-" or string.format("%.0f%s", x, snap and "!" or "") end
-            show(at(0), at(100))       -- within 1.5 m: left to the AI
-            show(at(0), at(400))       -- 25% of 4 m
-            show(at(0), at(1500))      -- 25% would be 3.75 m: capped at 1.2 m
-            show(at(0), at(2500))      -- beyond 20 m: jump
-            show(at(0), { X = 0/0, Y = 0, Z = 0 })   -- NaN: nothing
-            -- a 6 m drift closes in a few updates without ever jumping
+            show(at(0), at(100)) show(at(0), at(400)) show(at(0), at(1500)) show(at(0), at(2500))
+            show(at(0), { X = 0/0, Y = 0, Z = 0 })
             local cur, n = at(0), 0
             while true do local x = smooth(cur, at(600)) if not x then break end cur = at(x) n = n + 1 end
             return table.concat(res, " ") .. " | 6 m closed in " .. n .. " updates to " .. string.format("%.0f", cur.X)
@@ -349,103 +328,21 @@ fn guest_enemies_glide_back_and_only_jump_across_big_gaps() {
 }
 
 #[test]
-fn catch_up_asks_once_and_answers_with_everything_once() {
-    let lua = load("sync.lua", &scratch("catchup"));
+fn fork_loader_reads_the_ini_loads_every_extra_and_adds_its_commands() {
+    let dir = scratch("fork");
+    let lua = load("", &dir);
+    let script = mod_dir().join("Scripts/fork.lua").to_string_lossy().replace('\\', "/");
     let out: String = lua
-        .load(
+        .load(format!(
             r#"
-            M.catchUp = true
-            net.enabled = true
-            local tick = api.coop.extraTicks.sync
-            for _ = 1, 120 do tick() end                           -- first scan: baseline, and the request
-            for _ = 1, 120 do tick() end                           -- no second request
-            local asked = table.concat(sent, ";")
-            sent = {}
-            M.known.quests["/Game/Quests/Q1.Q1_C"] = true
-            M.known.bells["Bell_NLES_001"] = true
-            M.known.actors["PBZ_Xigu_WP-BP_Chest_C_1"] = true
-            api.coop.handlers.Z()
-            api.coop.handlers.Z()                                   -- answered once per session
-            table.sort(sent)
-            return asked .. " | " .. table.concat(sent, ";")
-            "#,
-        )
+            local commands = {{}}
+            dofile("{script}")(api, commands)
+            local names = {{}} for k in pairs(commands) do names[#names + 1] = k end table.sort(names)
+            return table.concat(names, ",") .. " | sync " .. tostring(api.sync and api.sync.on) .. " | regroup key "
+                .. tostring(api.regroup and api.regroup.key) .. " | bound " .. tostring(bound.F5 ~= nil) .. " | " .. logs[#logs]
+            "#
+        ))
         .eval()
         .unwrap();
-    assert_eq!(out, "Z | A PBZ_Xigu_WP-BP_Chest_C_1;L Bell_NLES_001;Q /Game/Quests/Q1.Q1_C");
-}
-
-#[test]
-fn quest_steps_complete_the_same_branch_and_lifts_follow_the_partner() {
-    let lua = load("sync.lua", &scratch("steps"));
-    let out: String = lua
-        .load(
-            r#"
-            local log = {}
-            local function obj(t) t.IsValid = function() return true end return t end
-            local branch = obj({ done = false, IsCompleted = function(self) return self.done end,
-                SucceedBranch = function(self) self.done = true log[#log + 1] = "SucceedBranch" end })
-            local quest = obj({ GetQuestCompletion = function() return 1 end,
-                GetBranch = function(_, id) log[#log + 1] = "GetBranch " .. id return branch end })
-            objects.PBZNarrativeComponent = obj({ GetQuest = function() return nil end,
-                BeginQuest = function() log[#log + 1] = "BeginQuest" return quest end,
-                GetInProgressQuests = function() return {} end, GetAllQuests = function() return {} end })
-            function StaticFindObject(p) return obj({ path = p }) end
-            local W = api.coop.handlers.W
-            W("/Game/PBZstory/PBZQuest/Main/MainCh2.MainCh2_C MainCh2_PBZQuestBranch_4")
-            W("/Game/PBZstory/PBZQuest/Main/MainCh2.MainCh2_C MainCh2_PBZQuestBranch_4")  -- already done: no-op
-            W("not a path B1")
-            -- lifts: the partner's lift went up; ours moves up once, and isn't sent back
-            local lift = obj({ Positive = false, DoPositiveAction = function(self) self.Positive = true log[#log + 1] = "up" end,
-                DoNegativeAction = function(self) self.Positive = false log[#log + 1] = "down" end })
-            objects.PBZLevelActorManager = { GetActorByID = function() return lift end, ActorSaveData = { ForEach = function() end } }
-            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_1_2 1")
-            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_1_2 1")
-            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_1_2 0")
-            return table.concat(log, ", ") .. " | sent " .. #sent
-            "#,
-        )
-        .eval()
-        .unwrap();
-    assert_eq!(out, "BeginQuest, GetBranch MainCh2_PBZQuestBranch_4, SucceedBranch, BeginQuest, GetBranch MainCh2_PBZQuestBranch_4, up, down | sent 0");
-}
-
-#[test]
-fn upgrades_only_go_up_cycles_are_compared_and_lifts_wait_for_their_area() {
-    let lua = load("sync.lua", &scratch("levels"));
-    let out: String = lua
-        .load(
-            r#"
-            local calls = {}
-            local function obj(t) t.IsValid = function() return true end return t end
-            local levels = { Tang = 30 }
-            local function map(field) return { ForEach = function(_, f)
-                for id, lv in pairs(levels) do f({ get = function() return { ToString = function() return id end } end },
-                    { get = function() return { [field] = lv } end }) end end } end
-            local bp = obj({ MainWeaponInfos = map("WeaponLevel"),
-                UpgradeWeapon = function(_, id, normal, lv) calls[#calls + 1] = "UpgradeWeapon " .. id .. " " .. lv levels[id] = lv end })
-            function FindAllOf(cls) if cls == "PBZBackPackSubsystem" then return { bp } end return {} end
-            local O = api.coop.handlers.O
-            O("weap Tang 45")            -- partner higher: raised
-            O("weap Tang 40")            -- partner lower: nothing
-            O("weap Nope 50")            -- not owned here: fails, nothing called
-            O("weap Tang x")             -- malformed
-            -- cycle / difficulty
-            objects.PBZGameSystem = { GetCycleCount = function() return 1 end, GetDifficultModeByte = function() return 4 end }
-            api.coop.handlers.CYC("1 4")
-            api.coop.handlers.CYC("0 2")
-            -- a lift moved by the partner while its area isn't loaded here waits, then moves once loaded
-            objects.PBZLevelActorManager = { GetActorByID = function() return nil end }
-            function StaticFindObject(p) return obj({}) end
-            api.coop.handlers.F("PBZ_Fujizhilin_WP-BP_Lift_C_UAID_9_9 1")
-            local waiting = M.pendingLifts["PBZ_Fujizhilin_WP-BP_Lift_C_UAID_9_9"]
-            return table.concat(calls, ", ") .. " | failed " .. M.failed .. " | lift waiting " .. tostring(waiting)
-                .. " | " .. table.concat(tips, " / ")
-            "#,
-        )
-        .eval()
-        .unwrap();
-    assert!(out.starts_with("UpgradeWeapon Tang 45 | failed 1 | lift waiting true | "), "{out}");
-    assert!(out.contains("cycle 0, difficulty 2; yours is cycle 1, difficulty 4"), "{out}");
-    assert_eq!(out.matches("cycle:").count(), 1, "same cycle and difficulty: no tip: {out}");
+    assert_eq!(out, "regroup,sync | sync true | regroup key F5 | bound true | Fork extras loaded: shared progress true, regroup true, dialogue true, map icon true");
 }
