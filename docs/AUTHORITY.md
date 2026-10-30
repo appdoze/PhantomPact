@@ -114,3 +114,5 @@ real respawn:
 - If both players swing at the same enemy within the same 1.5 s in PvP, the ghost's replay can't be told from your
   own hit, so that drop is reported. It's harmless outside PvP, where the ghost does no damage.
 - Enemy AI isn't synced: each world's copy picks its own attacks. Its position snaps back if it drifts over 4 m.
+- `Connect = Steam` is tested up to Valve's network: relay logic in unit tests, and Steam starting next to both
+  games. Two real accounts haven't connected through it yet; steps are in [STEAM_TEST.md](STEAM_TEST.md).
